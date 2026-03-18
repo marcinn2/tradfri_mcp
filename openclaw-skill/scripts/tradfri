@@ -14,9 +14,19 @@
 
 set -euo pipefail
 
+# 別名 mapping（口語 → aliases.json 正式名稱）
+map_name() {
+  case "$1" in
+    電視牆|電視牆燈) echo "客廳電視牆" ;;
+    沙發) echo "沙發燈" ;;
+    光條) echo "玄關光條" ;;
+    *) echo "$1" ;;
+  esac
+}
+
 if [ $# -lt 1 ]; then
   echo "用法: tradfri <名稱> <動作> [參數]"
-  echo "動作: 開, 關, 亮度 <0-254>, 色溫 暖/冷, 查詢, 列表"
+  echo "動作: 開, 關, 亮度 <0-100>, 色溫 暖/冷, 顏色, 查詢, 列表"
   exit 1
 fi
 
@@ -29,23 +39,17 @@ case "$1" in
       echo "用法: tradfri 查詢 <名稱>"
       exit 1
     fi
-    exec mcporter call tradfri.get_status "name=$2"
+    QNAME=$(map_name "$2")
+    exec mcporter call tradfri.get_status "name=$QNAME"
     ;;
   *)
     # 第一個參數是名稱，第二個是動作
-    NAME="$1"
+    NAME=$(map_name "$1")
     if [ $# -lt 2 ]; then
       echo "用法: tradfri <名稱> <動作>"
       exit 1
     fi
     ACTION="$2"
-
-    # 別名 mapping（模型常用的口語 → aliases.json 裡的正式名稱）
-    case "$NAME" in
-      電視牆|電視牆燈) NAME="客廳電視牆" ;;
-      沙發) NAME="沙發燈" ;;
-      光條) NAME="玄關光條" ;;
-    esac
 
     # 「全部」→ 逐個執行所有名稱
     if [ "$NAME" = "全部" ] || [ "$NAME" = "全部燈" ] || [ "$NAME" = "所有燈" ]; then
