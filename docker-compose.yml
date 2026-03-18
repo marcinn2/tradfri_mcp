@@ -1,0 +1,14 @@
+services:
+  tradfri-mcp:
+    build: .
+    container_name: kc_tradfri_mcp
+    restart: unless-stopped
+    network_mode: host          # 需要直接訪問 LAN gateway
+    env_file:
+      - .env
+    environment:
+      - MCP_PORT=8765
+    volumes:
+      - ./devices.json:/app/devices.json
+      - ./aliases.json:/app/aliases.json
+      - ./.tradfri_psk.json:/app/.tradfri_psk.json:ro

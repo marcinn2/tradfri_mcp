@@ -1,0 +1,26 @@
+# 敏感資訊 — 不進 git
+.tradfri_psk.json
+.env
+
+# 設備快取 — 本機產生，各人不同
+devices.json
+
+# Python
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.so
+*.egg-info/
+dist/
+build/
+
+# Autoconf / build cache
+autom4te.cache/
+config.log
+config.status
+configure~
+
+# macOS
+.DS_Store

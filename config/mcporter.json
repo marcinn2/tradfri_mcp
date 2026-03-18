@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "tradfri": {
+      "baseUrl": "http://localhost:8765/mcp"
+    }
+  },
+  "imports": []
+}
