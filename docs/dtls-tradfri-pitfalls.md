@@ -1,5 +1,7 @@
 # 在 macOS 上透過 DTLS 連接 IKEA TRADFRI Gateway — 踩坑紀錄與修法
 
+> **English summary:** This document records every pitfall encountered while establishing a DTLS + CoAP connection to an IKEA TRADFRI E1526 gateway on macOS using Python. Covers 9 issues including OpenSSL 3 AES-CCM incompatibility, macOS AF_INET6 socket behavior, TinyDTLS C source patches (sequence dedup reset, renegotiation_info bypass), pytradfri pydantic model incompatibility, and aiocoap credential URI formatting. Includes working minimal code examples and a complete debugging methodology appendix. The document is written in Traditional Chinese.
+
 本文記錄了在 macOS 上以 Python 建立 DTLS + CoAP 連線至 TRADFRI E1526 gateway 所踩到的所有坑，以及每個坑的根本原因與解法。
 
 **最終達成目標**：列出 gateway 下所有設備（燈具、插座、遙控器）、群組、場景，不依賴 pytradfri model 層。

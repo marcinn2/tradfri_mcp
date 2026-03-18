@@ -5,7 +5,7 @@
 [![FastMCP](https://img.shields.io/badge/FastMCP-3.x-orange.svg)](https://github.com/jlowin/fastmcp)
 [![MCP](https://img.shields.io/badge/Protocol-MCP-purple.svg)](https://modelcontextprotocol.io)
 
-[繁體中文](README_zh.md)
+[正體中文](README_zh.md)
 
 MCP Server for IKEA TRADFRI smart home gateway. Wraps CoAP-over-DTLS into MCP tools so AI assistants can control lights, plugs, and scenes via natural language.
 

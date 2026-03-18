@@ -1,5 +1,7 @@
 # 自製 MCP Server 接進 OpenClaw：以 IKEA TRADFRI 智慧家居為例
 
+> **English summary:** End-to-end tutorial on building a custom MCP Server for IKEA TRADFRI smart home integration with OpenClaw. Covers: architecture design (why FastMCP + Docker + HTTP transport), CoAP device topology management (virtual rooms, alias system), 12 MCP tools (control, color temp, color, scenes, status, OBSERVE push notifications), OpenClaw integration via mcporter skill + wrapper script, and a complete testing strategy. Includes pitfalls specific to macOS Docker networking, 8B LLM tool-calling reliability, and the critical role of AGENTS.md. The document is written in Traditional Chinese.
+
 本文記錄了一個完整的實作歷程：如何在 macOS 上打通 IKEA TRADFRI 智慧家居 gateway 的通訊層，並將控制能力包裝成 MCP Server，讓 OpenClaw AI assistant 能透過自然語言指令操控家中的燈具、插座與場景。
 
 **讀完本文，你能做到：**
