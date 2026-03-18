@@ -348,4 +348,11 @@ npx @modelcontextprotocol/inspector http://localhost:8765/mcp
 # -> http://localhost:6274
 ```
 
+---
+
+## Related Projects
+
+- [kc_openclaw_local_llm](https://github.com/KerberosClaw/kc_openclaw_local_llm) — OpenClaw + Local LLM: What Actually Works
+- [kc_ai_skills](https://github.com/KerberosClaw/kc_ai_skills) — AI Skills That Actually Do Things
+
 
