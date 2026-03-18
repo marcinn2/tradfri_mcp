@@ -5,52 +5,60 @@
 [![FastMCP](https://img.shields.io/badge/FastMCP-3.x-orange.svg)](https://github.com/jlowin/fastmcp)
 [![MCP](https://img.shields.io/badge/Protocol-MCP-purple.svg)](https://modelcontextprotocol.io)
 
-IKEA TRADFRI 智慧家居的 MCP Server。將 CoAP-over-DTLS 通訊封裝成 MCP tools，讓 AI assistant 能用自然語言控制燈具、插座與場景。
+[繁體中文](README_zh.md)
 
 MCP Server for IKEA TRADFRI smart home gateway. Wraps CoAP-over-DTLS into MCP tools so AI assistants can control lights, plugs, and scenes via natural language.
 
-> **詳細教程 / Full tutorial**：[`docs/openclaw-tradfri-mcp-tutorial.md`](docs/openclaw-tradfri-mcp-tutorial.md)
-> **DTLS 踩坑紀錄 / DTLS pitfalls**：[`docs/dtls-tradfri-pitfalls.md`](docs/dtls-tradfri-pitfalls.md)
+> **Full tutorial**: [`docs/openclaw-tradfri-mcp-tutorial.md`](docs/openclaw-tradfri-mcp-tutorial.md)
+> **DTLS pitfalls on macOS**: [`docs/dtls-tradfri-pitfalls.md`](docs/dtls-tradfri-pitfalls.md)
 
 ---
 
-## 架構 / Architecture
+## Architecture
 
 ```
 User (Telegram / Web UI)
-  → AI Agent (OpenClaw / Claude Desktop / etc.)
-  → mcporter CLI (MCP client)
-  → tradfri-mcp (Docker, FastMCP HTTP server, port 8765)
-  → aiocoap (CoAP over DTLS)
-  → TRADFRI gateway (LAN, UDP 5684)
-  → Zigbee → 燈具 / Lights
+  -> AI Agent (OpenClaw / Claude Desktop / etc.)
+  -> mcporter CLI (MCP client)
+  -> tradfri-mcp (Docker, FastMCP HTTP server, port 8765)
+  -> aiocoap (CoAP over DTLS)
+  -> TRADFRI gateway (LAN, UDP 5684)
+  -> Zigbee -> Lights / Plugs
 ```
 
-## 目錄結構 / Project Structure
+## Features
+
+- **Natural language control** — "turn on the living room lights" just works
+- **12 MCP tools** — on/off, brightness, color temp, color, scenes, status, and more
+- **Alias system** — map friendly names to devices, groups, or virtual rooms
+- **CoAP OBSERVE push notifications** — get notified via Telegram when lights change (e.g. via remote or Apple Home)
+- **Docker-ready** — `docker compose up -d` with log rotation
+- **Vendored TinyDTLS** — patched for macOS; no OpenSSL 3 dependency
+
+## Project Structure
 
 ```
 kc_tradfri_mcp/
-├── server.py              # FastMCP HTTP server（主程式）
-├── coap_client.py         # aiocoap 封裝（CoAP GET/PUT，singleton context）
-├── config.py              # 環境變數設定
-├── devices.py             # 設備拓撲管理（devices.json / aliases.json）
-├── aliases.json           # 自訂別名（含 virtual room）
-├── devices.json           # 設備快取（scan 產生，.gitignore）
-├── .tradfri_psk.json      # PSK 憑證（.gitignore）
-├── .env / .env.example    # 環境變數
+├── server.py              # FastMCP HTTP server (main entry)
+├── coap_client.py         # aiocoap wrapper (CoAP GET/PUT, singleton context)
+├── config.py              # Environment variable config
+├── devices.py             # Device topology (devices.json / aliases.json)
+├── aliases.json           # Custom aliases (incl. virtual rooms)
+├── .tradfri_psk.json      # PSK credentials (.gitignore)
+├── .env / .env.example    # Environment variables
 ├── Dockerfile
 ├── docker-compose.yml
 ├── pyproject.toml / uv.lock
-├── vendor/dtlssocket/     # DTLSSocket 0.2.3（TinyDTLS 已 patch）
+├── vendor/dtlssocket/     # DTLSSocket 0.2.3 (TinyDTLS patched for macOS)
 ├── scripts/
-│   ├── gen_psk.py         # 產生 PSK 憑證
-│   └── scan.py            # 掃描 gateway 設備
-├── openclaw-skill/        # OpenClaw skill（見「OpenClaw 整合」）
+│   ├── gen_psk.py         # Generate PSK credentials
+│   └── scan.py            # Scan gateway devices
+├── openclaw-skill/        # OpenClaw skill (see "OpenClaw Integration")
 │   ├── SKILL.md
 │   ├── _meta.json
 │   ├── .clawhub/origin.json
 │   └── scripts/
-│       └── tradfri        # wrapper script（簡化 mcporter 呼叫）
+│       └── tradfri        # Wrapper script (simplifies mcporter calls)
 └── docs/
     ├── dtls-tradfri-pitfalls.md
     └── openclaw-tradfri-mcp-tutorial.md
@@ -58,308 +66,286 @@ kc_tradfri_mcp/
 
 ---
 
-## 快速開始 / Quick Start
+## Quick Start
 
-### 1. Clone 並安裝依賴
+### 1. Clone and install dependencies
 
 ```bash
-git clone https://github.com/YOUR_USERNAME/kc_tradfri_mcp.git
+git clone https://github.com/KerberosClaw/kc_tradfri_mcp.git
 cd kc_tradfri_mcp
 uv sync
 ```
 
-### 2. 產生 PSK 憑證
+### 2. Generate PSK credentials
 
 ```bash
 export TRADFRI_GATEWAY_IP=192.168.x.x
-export TRADFRI_SECURITY_CODE=xxxxxxxxxxxxxxxx   # gateway 背面的碼
+export TRADFRI_SECURITY_CODE=xxxxxxxxxxxxxxxx   # printed on the gateway
 
 uv run python scripts/gen_psk.py
-# → .tradfri_psk.json 建立完成
+# -> .tradfri_psk.json created
 ```
 
-> 若已有 `.tradfri_psk.json`，跳過此步驟。
-> DTLS 相關問題見 [`docs/dtls-tradfri-pitfalls.md`](docs/dtls-tradfri-pitfalls.md)。
+> Skip this step if you already have `.tradfri_psk.json`.
+> For DTLS issues, see [`docs/dtls-tradfri-pitfalls.md`](docs/dtls-tradfri-pitfalls.md).
 
-### 3. 掃描設備
+### 3. Scan devices
 
 ```bash
 uv run python scripts/scan.py
-# 輸出存為 devices.json；或啟動後用 mcporter call tradfri.refresh_devices
+# Output saved to devices.json; or use mcporter call tradfri.refresh_devices later
 ```
 
-### 4. 設定
+### 4. Configure
 
 ```bash
 cp .env.example .env
-# 編輯 .env，填入 TRADFRI_GATEWAY_IP
+# Edit .env — set TRADFRI_GATEWAY_IP
 ```
 
-編輯 `aliases.json`，設定自訂名稱（支援四種類型）：
+Edit `aliases.json` to define friendly names (supports four types):
 
 ```json
 {
-  "客廳": {
+  "Living Room": {
     "type": "virtual",
     "groups": [131079],
     "devices": [65545, 65553, 65554, 65555]
   },
-  "主臥室": {"type": "group", "id": 131089},
-  "餐廳軌道燈": {"type": "device_list", "ids": [65579, 65580, 65581]},
-  "餐桌燈": {"type": "device", "id": 65551}
+  "Bedroom": {"type": "group", "id": 131089},
+  "Dining Track": {"type": "device_list", "ids": [65579, 65580, 65581]},
+  "Desk Lamp": {"type": "device", "id": 65551}
 }
 ```
 
-| 類型 | 說明 |
-|------|------|
-| `virtual` | 虛擬房間：組合多個 IKEA group + 獨立設備 |
-| `group` | IKEA 原生群組 |
-| `device_list` | 多個設備的集合（無 IKEA group 時用）|
-| `device` | 單一設備 |
+| Type | Description |
+|------|-------------|
+| `virtual` | Virtual room: combine multiple IKEA groups + standalone devices |
+| `group` | Native IKEA group |
+| `device_list` | Collection of devices (when no IKEA group exists) |
+| `device` | Single device |
 
-### 5. 啟動（Docker）
+### 5. Start (Docker)
 
 ```bash
 docker compose up -d
-docker compose logs -f   # 確認 DTLS 握手成功
+docker compose logs -f   # verify DTLS handshake succeeds
 ```
 
-### 6. 連接 mcporter
+### 6. Connect mcporter
 
 ```bash
 npm install -g mcporter
 mcporter config add tradfri --url http://localhost:8765/mcp
-mcporter list tradfri   # 確認 tools 出現
+mcporter list tradfri   # verify tools appear
 ```
 
-### 7. 測試
+### 7. Test
 
 ```bash
 mcporter call tradfri.list_aliases
-mcporter call tradfri.control_by_name name=客廳 state=false
-mcporter call tradfri.control_by_name name=客廳 state=true
-mcporter call tradfri.set_color_temp name=餐桌燈 direction=warm
+mcporter call tradfri.control_by_name name="Living Room" state=false
+mcporter call tradfri.control_by_name name="Living Room" state=true
+mcporter call tradfri.set_color_temp name="Desk Lamp" direction=warm
 ```
 
 ---
 
 ## MCP Tools
 
-| Tool | 說明 |
-|------|------|
-| `control_group` | 控制群組（開關、亮度）|
-| `control_device` | 控制單一設備 |
-| `control_by_name` | **最常用** — 以 alias 名稱控制（支援所有 alias 類型）|
-| `set_color_temp` | 色溫調整（`direction: warm/cool` 或 `mireds: 250-454`）|
-| `set_color` | 設定顏色（RGB 燈泡：red/green/blue/orange/yellow/purple/pink）|
-| `activate_scene` | 觸發場景 |
-| `get_status` | 查詢即時狀態（支援 `name=`）|
-| `list_devices` | 列出所有設備、群組、場景、alias |
-| `list_aliases` | 列出 alias 清單（輕量，供 LLM 快速確認）|
-| `refresh_devices` | 重新掃描 gateway，更新 devices.json |
-| `find_by_name` | 名稱 → ID 解析 |
-| `send_notification` | Telegram 推播（未設定時靜默略過）|
+| Tool | Description |
+|------|-------------|
+| `control_group` | Control a group (on/off, brightness) |
+| `control_device` | Control a single device |
+| `control_by_name` | **Most used** — control by alias name (all alias types) |
+| `set_color_temp` | Adjust color temperature (`direction: warm/cool` or `mireds: 250-454`) |
+| `set_color` | Set color (RGB bulbs: red/green/blue/orange/yellow/purple/pink) |
+| `activate_scene` | Trigger a scene |
+| `get_status` | Query real-time status (supports `name=`) |
+| `list_devices` | List all devices, groups, scenes, and aliases |
+| `list_aliases` | List alias names (lightweight, for LLM quick lookup) |
+| `refresh_devices` | Re-scan gateway, update devices.json |
+| `find_by_name` | Resolve name to ID |
+| `send_notification` | Telegram push notification (silent no-op if unconfigured) |
 
 ---
 
-## 環境變數 / Environment Variables
+## CoAP OBSERVE (Push Notifications)
 
-| 變數 | 必填 | 預設 | 說明 |
-|------|------|------|------|
-| `TRADFRI_GATEWAY_IP` | **是** | — | Gateway LAN IP |
+On startup, the server subscribes to CoAP OBSERVE on every alias. When a light changes state (e.g. via physical remote or Apple Home), the server detects the change and sends a Telegram notification.
+
+**Requirements:** Set `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID` in `.env`.
+
+**Behavior:**
+- Baseline state captured at startup
+- Only notifies on **state changes** (not initial values)
+- Auto-reconnects on OBSERVE subscription failure (retry interval: `TRADFRI_POLL_INTERVAL`, default 30s)
+- Does not interfere with control operations (OBSERVE owns the CoAP context lifecycle)
+
+---
+
+## Environment Variables
+
+| Variable | Required | Default | Description |
+|----------|----------|---------|-------------|
+| `TRADFRI_GATEWAY_IP` | **Yes** | — | Gateway LAN IP |
 | `MCP_PORT` | | `8765` | HTTP server port |
 | `MCP_HOST` | | `0.0.0.0` | Bind address |
-| `PSK_FILE` | | `.tradfri_psk.json` | PSK 憑證路徑 |
-| `DEVICES_FILE` | | `devices.json` | 設備快取路徑 |
-| `ALIASES_FILE` | | `aliases.json` | 別名對應路徑 |
-| `TELEGRAM_BOT_TOKEN` | | — | Telegram Bot token（選填） |
-| `TELEGRAM_CHAT_ID` | | — | Telegram Chat ID（選填） |
-| `TRADFRI_POLL_INTERVAL` | | `30` | OBSERVE 中斷後重試間隔（秒）|
+| `PSK_FILE` | | `.tradfri_psk.json` | PSK credentials path |
+| `DEVICES_FILE` | | `devices.json` | Device cache path |
+| `ALIASES_FILE` | | `aliases.json` | Alias mapping path |
+| `TELEGRAM_BOT_TOKEN` | | — | Telegram Bot token (optional, for push notifications) |
+| `TELEGRAM_CHAT_ID` | | — | Telegram Chat ID (optional) |
+| `TRADFRI_POLL_INTERVAL` | | `30` | OBSERVE reconnect interval in seconds |
 
 ### Docker Log Rotation
 
-Container log 自動 rotate（`max-size: 10m`，保留 3 個檔案，上限 30MB）。所有 MCP tool call 會記錄在 log 中（如 `control_by_name(name='客廳', state=True)`），方便除錯但不會無限成長。
+Container logs auto-rotate (`max-size: 10m`, 3 files, 30MB cap). All MCP tool calls are logged (e.g. `control_by_name(name='Living Room', state=True)`) for debugging without unbounded growth.
 
 ---
 
-## OpenClaw 整合
+## OpenClaw Integration
 
-### 原理
+### How it works
 
-OpenClaw 沒有 `mcpServers` 設定（與 Claude Desktop 不同）。它的 MCP 整合走 **mcporter skill**：AI agent 透過 `exec` 工具執行 `mcporter` CLI 來呼叫 MCP tools。
+OpenClaw doesn't have a `mcpServers` config (unlike Claude Desktop). Its MCP integration uses the **mcporter skill**: the AI agent calls `mcporter` CLI via the `exec` tool.
 
-但 8B 模型（如 qwen3-vl:8b-instruct）無法可靠地 exec 複雜的 mcporter 語法：
+For smaller LLMs, complex mcporter syntax can be unreliable:
 
 ```bash
-# 這對 8B 模型太複雜 — 多個 key=value 參數 + 不同 tool 名稱
-mcporter call tradfri.control_by_name name=客廳 state=true
-mcporter call tradfri.set_color_temp name=客廳 direction=warm
+# Too complex for smaller models — multiple key=value params + different tool names
+mcporter call tradfri.control_by_name name=Living\ Room state=true
+mcporter call tradfri.set_color_temp name=Living\ Room direction=warm
 ```
 
-解法是 **SearXNG 模式**：建一個 wrapper script，把複雜度藏起來，讓 LLM 只需 exec 簡單的中文指令：
+The solution is a **wrapper script** that hides the complexity:
 
 ```bash
-tradfri 客廳 開
-tradfri 客廳 關
-tradfri 客廳 亮度 80       # 百分比 0-100
-tradfri 客廳 色溫 暖
-tradfri 餐桌燈 顏色 紅     # RGB 燈泡：紅/綠/藍/橙/黃/紫/粉
-tradfri 查詢 客廳
-tradfri 列表
+tradfri Living\ Room on
+tradfri Living\ Room off
+tradfri Living\ Room brightness 80    # percentage 0-100
+tradfri Living\ Room colortemp warm
+tradfri Desk\ Lamp color red          # RGB bulbs: red/green/blue/orange/yellow/purple/pink
+tradfri status Living\ Room
+tradfri list
 ```
 
-### 安裝步驟
+### Installation
 
-**前置：** 確認 mcporter 已安裝且已設定（見「快速開始」步驟 6）。
+**Prerequisites:** mcporter installed and configured (see Quick Start step 6).
 
-**1. 安裝 OpenClaw skill**
+**1. Install OpenClaw skill**
 
 ```bash
-# 複製到 OpenClaw workspace（不能用 symlink，OpenClaw 會拒絕跨目錄的 realPath）
+# Copy to OpenClaw workspace (symlinks not supported — OpenClaw rejects cross-directory realPath)
 cp -r openclaw-skill ~/.openclaw/workspace/skills/tradfri
 ```
 
-**2. 安裝 wrapper script**
+**2. Install wrapper script**
 
 ```bash
 ln -s $(pwd)/openclaw-skill/scripts/tradfri /opt/homebrew/bin/tradfri
-# Linux：ln -s $(pwd)/openclaw-skill/scripts/tradfri /usr/local/bin/tradfri
+# Linux: ln -s $(pwd)/openclaw-skill/scripts/tradfri /usr/local/bin/tradfri
 ```
 
-**3. 在 AGENTS.md 加入燈控指令**
+**3. Add instructions to AGENTS.md**
 
-在 `~/.openclaw/workspace/AGENTS.md` 加入（**不是 systemPrompt，不是 SKILL.md**）：
+Add to `~/.openclaw/workspace/AGENTS.md` (**not** systemPrompt, **not** SKILL.md):
 
 ```markdown
-## IKEA TRADFRI 燈控
+## IKEA TRADFRI Light Control
 
-收到燈控請求 → 立即 exec `tradfri` 指令，不解釋不確認。
+When asked to control lights -> exec `tradfri` command immediately, no explanation needed.
 
-tradfri 客廳電視牆 開
-tradfri 客廳 關
-tradfri 客廳 亮度 80
-tradfri 餐桌燈 色溫 暖
-tradfri 餐桌燈 顏色 紅
-tradfri 查詢 沙發燈
-tradfri 列表
+tradfri Living\ Room on
+tradfri Living\ Room off
+tradfri Living\ Room brightness 80
+tradfri Desk\ Lamp colortemp warm
+tradfri Desk\ Lamp color red
+tradfri status Desk\ Lamp
+tradfri list
 ```
 
-> **重要：** 只有 AGENTS.md 的內容會被完整注入到 LLM context。systemPrompt 和 SKILL.md 不可靠。
+> **Important:** Only AGENTS.md content is fully injected into the LLM context. systemPrompt and SKILL.md are not reliably included.
 
-**4. 重啟 OpenClaw gateway**
+**4. Restart OpenClaw gateway**
 
 ```bash
 launchctl kickstart -k gui/$(id -u)/ai.openclaw.gateway
 ```
 
-**5. 測試**
+**5. Test**
 
-在 Telegram 對 OpenClaw 說「開客廳燈」，確認燈亮起來。
-
-### SearXNG 模式說明
-
-此整合方案參考 SearXNG 的成功模式：
-
-| | SearXNG | TRADFRI |
-|---|---------|---------|
-| wrapper | `/opt/homebrew/bin/searxng-search` | `/opt/homebrew/bin/tradfri` |
-| 實際執行 | `uv run searxng.py search "$@"` | `mcporter call tradfri.* ...` |
-| LLM 看到的 | `searxng-search "關鍵字"` | `tradfri 客廳 開` |
-| 複雜度 | 一個引號參數 | 中文名稱 + 中文動作 |
-| skill | `searxng/SKILL.md` + triggers | `tradfri/SKILL.md` + triggers |
+Tell OpenClaw via Telegram: "turn on the living room lights" and verify.
 
 ---
 
-## 踩坑紀錄 / Pitfalls
+## Pitfalls
 
-### Docker `network_mode: host` 在 macOS 不能用
+### Docker `network_mode: host` doesn't work on macOS
 
-macOS Docker Desktop 跑在 LinuxKit VM 裡，`network_mode: host` 只暴露 VM 的網路，不是 Mac 的 LAN。
+macOS Docker runs inside a LinuxKit VM. `network_mode: host` only exposes the VM's network, not the Mac's LAN.
 
-**解法：** 使用預設 bridge 網路 + `ports` 映射。bridge 網路可以透過 VM NAT 存取 LAN IP（包括 gateway 的 UDP 5684）。此方案在 macOS 和 Linux 都能用。
+**Solution:** Use default bridge network + `ports` mapping. The bridge network can reach LAN IPs (including gateway UDP 5684) through VM NAT. Works on both macOS and Linux.
 
 ```yaml
 # docker-compose.yml
 services:
   tradfri-mcp:
     ports:
-      - "8765:8765"     # 不要用 network_mode: host
+      - "8765:8765"     # do NOT use network_mode: host
 ```
 
-### CoAP context 的所有權：OBSERVE 負責 reset
+### CoAP context ownership: OBSERVE owns the reset
 
-原始設計中 `coap_put` / `coap_get` 失敗時會 `_ctx = None` 重置 context。但這會破壞正在運作的 OBSERVE session（因為 TRADFRI gateway 每個 PSK identity 只允許一個 DTLS session）。
+Originally `coap_put` / `coap_get` would reset the CoAP context on failure (`_ctx = None`). This breaks active OBSERVE sessions because the TRADFRI gateway allows only one DTLS session per PSK identity.
 
-**正確做法：**
-- `coap_put` / `coap_get` 失敗時 **不 reset context**，直接 raise
-- OBSERVE task 偵測到連線中斷後，才呼叫 `reset_ctx()` 清除舊 context
-- 下次 `get_ctx()` 時自動建立新的 DTLS session
+**Correct approach:**
+- `coap_put` / `coap_get` on failure: **do not reset context**, just raise
+- OBSERVE task detects disconnection, then calls `reset_ctx()` to clear stale context
+- Next `get_ctx()` automatically creates a new DTLS session
 
-這個設計讓控制操作的暫時失敗不會影響正在運作的 OBSERVE 訂閱。
+### OBSERVE doesn't need semaphore serialization
 
-### OBSERVE 不需要 semaphore 序列化
+Attempted `asyncio.Semaphore(1)` + 2s delay to serialize OBSERVE init, thinking 20 concurrent GETs would overwhelm the gateway. Testing proved otherwise — the gateway handles concurrent OBSERVE GETs fine. The root cause was the context reset bug above, not concurrency.
 
-曾經嘗試用 `asyncio.Semaphore(1)` + 2 秒延遲來序列化 OBSERVE 初始化，認為 20 個並發 GET 會壓垮 gateway。實測證明 **不需要**：gateway 可以處理並發 OBSERVE GET，問題根源是上面的 context reset bug，不是並發量。
+Removing the semaphore reduced OBSERVE init time from ~40s to a few seconds.
 
-移除 semaphore 後 OBSERVE 初始化時間從 ~40 秒降到幾秒。
+### OpenClaw skill can't use symlinks
 
-### OpenClaw skill 不能用 symlink
+If `~/.openclaw/workspace/skills/tradfri` is a symlink, OpenClaw rejects it: `Skipping skill path that resolves outside its configured root.` Must use `cp -r`.
 
-`~/.openclaw/workspace/skills/tradfri` 如果是 symlink 指向 repo 目錄，OpenClaw 會拒絕載入：`Skipping skill path that resolves outside its configured root.`。必須用 `cp -r` 複製實際檔案。
+### Only AGENTS.md is fully injected into LLM context
 
-### OpenClaw 只有 AGENTS.md 會被完整注入 LLM context
+`openclaw.json`'s `systemPrompt` is appended at the end of the system prompt and easily truncated. `SKILL.md` only has name/description referenced, not content. Only `AGENTS.md` content fully appears in the LLM's system prompt.
 
-`openclaw.json` 的 `systemPrompt` 被放在 system prompt 末尾，容易被截斷或被模型忽略。`SKILL.md` 只有 name/description 被引用，內容不注入。只有 `AGENTS.md` 的內容完整出現在 LLM 看到的 system prompt 中。所有關鍵指令（燈控、搜尋）都要寫在 AGENTS.md。
+### `_comment` in aliases.json crashes list_devices
 
-### aliases.json 的 `_comment` 會導致 list_devices crash
-
-`aliases.json` 裡的 `"_comment": "..."` 是 string，`list_devices` 裡 `target.get("type")` 會 crash。修法：跳過非 dict 的 entries。
-
-### 8B LLM 無法可靠 exec 複雜 mcporter 語法
-
-qwen3-vl:8b-instruct 在收到「開客廳燈」時嘗試 exec `mcporter call tradfri.control_by_name name=客廳 state=true`，但結果是：
-- PC 風扇狂轉（模型 inference 卡住），最終無回應
-- 或模型產生幻覺（捏造結果，實際沒有 exec）
-
-**根因：** 多個 `key=value` 參數 + 不同 tool 名稱對 8B 模型太複雜。
-
-**解法：** 仿照 SearXNG 成功模式，建 wrapper script 讓 LLM 只需 exec 簡化的中文指令。
-
-### systemPrompt 不要塞 TRADFRI 細節
-
-8B 模型的 context window 有限（49K tokens，但 tool schemas 已佔用大量空間）。把 21 個設備名稱 + 5 種指令格式全塞進 systemPrompt 會：
-- 增加 inference 時間
-- 降低其他指令（搜尋、SSH、cron）的遵循度
-
-**解法：** systemPrompt 只留一句觸發規則，細節放在 skill SKILL.md。Skill 只在 trigger 匹配時才注入 context。
+A `"_comment": "..."` string entry in `aliases.json` causes `target.get("type")` to crash. Fix: skip non-dict entries.
 
 ---
 
-## 常見問題 / Troubleshooting
+## Troubleshooting
 
-| 錯誤 | 解法 |
-|------|------|
-| `CredentialsMissingError` | credentials URI 去掉 `:5684` port — 見 [`dtls-tradfri-pitfalls.md` #9](docs/dtls-tradfri-pitfalls.md) |
-| DTLS 握手失敗 | 需 patch TinyDTLS C 原始碼 — 見 [`dtls-tradfri-pitfalls.md` #6 #7](docs/dtls-tradfri-pitfalls.md) |
-| `NetworkError` 循環失敗 | 確認 `coap_client.py` 的 `coap_put`/`coap_get` 沒有 `_ctx = None`（見上方踩坑紀錄）|
-| 設備找不到 | `mcporter call tradfri.refresh_devices` 或 `uv run python scripts/scan.py` |
-| mcporter 連不上 | `docker compose ps` 確認容器運作，`curl http://localhost:8765/mcp` 確認 HTTP |
-| Docker 容器無法連 gateway | macOS 不支援 `network_mode: host`，改用 bridge + `ports`（見上方踩坑紀錄）|
+| Error | Solution |
+|-------|----------|
+| `CredentialsMissingError` | Remove `:5684` from credentials URI — see [`dtls-tradfri-pitfalls.md` #9](docs/dtls-tradfri-pitfalls.md) |
+| DTLS handshake failure | TinyDTLS C source needs patching — see [`dtls-tradfri-pitfalls.md` #6 #7](docs/dtls-tradfri-pitfalls.md) |
+| `NetworkError` loop | Ensure `coap_client.py`'s `coap_put`/`coap_get` don't set `_ctx = None` (see pitfalls above) |
+| Device not found | `mcporter call tradfri.refresh_devices` or `uv run python scripts/scan.py` |
+| mcporter can't connect | `docker compose ps` to verify container, `curl http://localhost:8765/mcp` to verify HTTP |
+| Docker container can't reach gateway | macOS doesn't support `network_mode: host`; use bridge + `ports` (see pitfalls above) |
 
 ---
 
-## 本機開發 / Development (without Docker)
+## Development (without Docker)
 
 ```bash
 TRADFRI_GATEWAY_IP=192.168.x.x uv run python server.py
 
 # MCP Inspector (Web UI)
 npx @modelcontextprotocol/inspector http://localhost:8765/mcp
-# → http://localhost:6274
+# -> http://localhost:6274
 ```
 
----
 
-## License
-
-MIT
