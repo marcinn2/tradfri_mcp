@@ -48,10 +48,15 @@ case "$1" in
         ;;
       亮度|brightness)
         if [ $# -lt 3 ]; then
-          echo "用法: tradfri $NAME 亮度 <0-254>"
+          echo "用法: tradfri $NAME 亮度 <0-100>"
           exit 1
         fi
-        exec mcporter call tradfri.control_by_name "name=$NAME" "brightness=$3"
+        # 百分比(0-100) → 0-254
+        VAL=$3
+        if [ "$VAL" -le 100 ] 2>/dev/null; then
+          VAL=$(( VAL * 254 / 100 ))
+        fi
+        exec mcporter call tradfri.control_by_name "name=$NAME" "brightness=$VAL"
         ;;
       色溫)
         if [ $# -lt 3 ]; then

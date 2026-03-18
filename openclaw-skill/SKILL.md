@@ -24,7 +24,7 @@ triggers:
 ```bash
 tradfri <名稱> 開
 tradfri <名稱> 關
-tradfri <名稱> 亮度 <0-254>
+tradfri <名稱> 亮度 <0-100>   # 百分比
 tradfri <名稱> 色溫 暖
 tradfri <名稱> 色溫 冷
 tradfri 查詢 <名稱>
