@@ -527,5 +527,5 @@ ctx.client_credentials.load_from_dict({
 
 ---
 
-*本文對應的 MCP server source code：[kc_tradfri_mcp](../)*
+*本文對應的 MCP server source code：[kc_tradfri_mcp](https://github.com/KerberosClaw/kc_tradfri_mcp)*
 *DTLS 踩坑詳細紀錄：[docs/dtls-tradfri-pitfalls.md](./dtls-tradfri-pitfalls.md)*
