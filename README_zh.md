@@ -1,4 +1,4 @@
-# kc_tradfri_mcp
+# 「把客廳的燈打開」— TRADFRI MCP
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
 [![Python](https://img.shields.io/badge/Python-3.12+-blue.svg)](https://python.org)
