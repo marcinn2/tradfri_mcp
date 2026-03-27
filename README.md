@@ -66,6 +66,8 @@ kc_tradfri_mcp/
 
 ---
 
+> **Security Notice:** This project is designed for trusted home LAN environments. The MCP server does not implement authentication or TLS. Do not expose the service port to the public internet without additional security measures.
+
 ## Quick Start (The Optimistic Version)
 
 ### 1. Clone and install dependencies
