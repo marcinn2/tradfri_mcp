@@ -6,7 +6,17 @@
     "groups": [131079],
     "devices": [65545, 65553, 65554, 65555, 65556, 65572, 65573, 65574]
   },
+  "Living Room": {
+    "type": "virtual",
+    "groups": [131079],
+    "devices": [65545, 65553, 65554, 65555, 65556, 65572, 65573, 65574]
+  },
   "玄關": {
+    "type": "virtual",
+    "groups": [],
+    "devices": [65552, 65558, 65559, 65575, 65549]
+  },
+  "Entryway": {
     "type": "virtual",
     "groups": [],
     "devices": [65552, 65558, 65559, 65575, 65549]
@@ -16,11 +26,24 @@
     "groups": [],
     "devices": [65551, 65579, 65580, 65581]
   },
+  "Dining Room": {
+    "type": "virtual",
+    "groups": [],
+    "devices": [65551, 65579, 65580, 65581]
+  },
   "主臥室": {
     "type": "group",
     "id": 131089
   },
+  "Master Bedroom": {
+    "type": "group",
+    "id": 131089
+  },
   "次臥室": {
+    "type": "group",
+    "id": 131088
+  },
+  "Second Bedroom": {
     "type": "group",
     "id": 131088
   },
@@ -29,7 +52,15 @@
     "type": "device_list",
     "ids": [65545, 65553, 65554, 65555, 65556]
   },
+  "Living Room TV Wall": {
+    "type": "device_list",
+    "ids": [65545, 65553, 65554, 65555, 65556]
+  },
   "沙發燈": {
+    "type": "group",
+    "id": 131079
+  },
+  "Sofa Light": {
     "type": "group",
     "id": 131079
   },
@@ -37,11 +68,23 @@
     "type": "device",
     "id": 65572
   },
+  "Living Room Spotlight": {
+    "type": "device",
+    "id": 65572
+  },
   "客廳閱讀燈": {
     "type": "device",
     "id": 65573
   },
+  "Living Room Reading Light": {
+    "type": "device",
+    "id": 65573
+  },
   "客廳展示燈": {
+    "type": "device",
+    "id": 65574
+  },
+  "Living Room Display Light": {
     "type": "device",
     "id": 65574
   },
@@ -50,7 +93,15 @@
     "type": "device",
     "id": 65552
   },
+  "Entryway Light Strip": {
+    "type": "device",
+    "id": 65552
+  },
   "玄關畫廊": {
+    "type": "device",
+    "id": 65558
+  },
+  "Entryway Gallery": {
     "type": "device",
     "id": 65558
   },
@@ -58,11 +109,23 @@
     "type": "device",
     "id": 65559
   },
+  "Entryway Panel": {
+    "type": "device",
+    "id": 65559
+  },
   "玄關主燈": {
     "type": "device",
     "id": 65575
   },
+  "Entryway Main Light": {
+    "type": "device",
+    "id": 65575
+  },
   "融蠟燈": {
+    "type": "device",
+    "id": 65549
+  },
+  "Wax Melt Lamp": {
     "type": "device",
     "id": 65549
   },
@@ -71,7 +134,15 @@
     "type": "device",
     "id": 65551
   },
+  "Dining Table Light": {
+    "type": "device",
+    "id": 65551
+  },
   "餐廳軌道燈": {
+    "type": "device_list",
+    "ids": [65579, 65580, 65581]
+  },
+  "Dining Track Lights": {
     "type": "device_list",
     "ids": [65579, 65580, 65581]
   },
@@ -80,7 +151,15 @@
     "type": "device_list",
     "ids": [65560, 65561, 65562]
   },
+  "Hallway Lights": {
+    "type": "device_list",
+    "ids": [65560, 65561, 65562]
+  },
   "衣櫥燈": {
+    "type": "device_list",
+    "ids": [65563, 65564, 65565, 65566, 65567]
+  },
+  "Closet Lights": {
     "type": "device_list",
     "ids": [65563, 65564, 65565, 65566, 65567]
   },
@@ -88,7 +167,15 @@
     "type": "device",
     "id": 65550
   },
+  "Floor Lamp": {
+    "type": "device",
+    "id": 65550
+  },
   "小夜燈": {
+    "type": "device",
+    "id": 65538
+  },
+  "Night Light": {
     "type": "device",
     "id": 65538
   }

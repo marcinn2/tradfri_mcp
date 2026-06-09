@@ -29,7 +29,7 @@ RANLIB=ranlib
 
 prefix = /usr/local
 exec_prefix = ${prefix}
-abs_builddir = /Users/otakubar/Developer/homekit-cli/kc_tradfri_mcp/vendor/dtlssocket/DTLSSocket/tinydtls
+abs_builddir = /Users/marcin/work/tradfri_mcp/vendor/dtlssocket/DTLSSocket/tinydtls
 top_builddir = .
 top_srcdir = .
 libdir = ${exec_prefix}/lib

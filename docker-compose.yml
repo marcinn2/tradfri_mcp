@@ -1,7 +1,7 @@
 services:
   tradfri-mcp:
     build: .
-    container_name: kc_tradfri_mcp
+    container_name: tradfri_mcp
     restart: unless-stopped
     ports:
       - "8765:8765"

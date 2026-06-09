@@ -1,5 +1,5 @@
 [project]
-name = "kc_tradfri_mcp"
+name = "tradfri_mcp"
 version = "0.1.0"
 description = "MCP Server for IKEA TRADFRI smart home gateway"
 readme = "README.md"
@@ -7,7 +7,7 @@ requires-python = ">=3.12"
 dependencies = [
     "aiocoap>=0.4.17",
     "dtlssocket",
-    "fastmcp>=3.1.1",
+    "fastmcp>=3.4.2",
     "python-dotenv>=1.2.2",
     "setuptools>=82.0.1",
 ]

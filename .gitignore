@@ -1,8 +1,8 @@
-# 敏感資訊 — 不進 git
+# secrets — not committed to git
 .tradfri_psk.json
 .env
 
-# 設備快取 — 本機產生，各人不同
+# device cache — generated locally, differs per user
 devices.json
 
 # Python

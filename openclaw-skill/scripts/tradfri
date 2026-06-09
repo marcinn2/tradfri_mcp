@@ -1,20 +1,20 @@
 #!/bin/bash
-# tradfri — IKEA TRADFRI 燈控 wrapper
-# 簡化 mcporter 呼叫，讓 8B LLM 能可靠地 exec
+# tradfri — IKEA TRADFRI light control wrapper
+# Simplifies mcporter calls so an 8B LLM can invoke them reliably via exec.
 #
-# 用法：
-#   tradfri 客廳 開
-#   tradfri 客廳 關
-#   tradfri 客廳 亮度 100
-#   tradfri 客廳 色溫 暖
-#   tradfri 客廳 色溫 冷
-#   tradfri 餐桌燈 顏色 紅
-#   tradfri 查詢 客廳
-#   tradfri 列表
+# Usage:
+#   tradfri <name> on
+#   tradfri <name> off
+#   tradfri <name> brightness 100
+#   tradfri <name> temp warm
+#   tradfri <name> temp cool
+#   tradfri <name> color red
+#   tradfri status <name>
+#   tradfri list
 
 set -euo pipefail
 
-# 別名 mapping（口語 → aliases.json 正式名稱）
+# spoken-form → canonical aliases.json name
 map_name() {
   case "$1" in
     電視牆|電視牆燈) echo "客廳電視牆" ;;
@@ -25,8 +25,8 @@ map_name() {
 }
 
 if [ $# -lt 1 ]; then
-  echo "用法: tradfri <名稱> <動作> [參數]"
-  echo "動作: 開, 關, 亮度 <0-100>, 色溫 暖/冷, 顏色, 查詢, 列表"
+  echo "usage: tradfri <name> <action> [arg]"
+  echo "actions: on, off, brightness <0-100>, temp warm/cool, color, list, status"
   exit 1
 fi
 
@@ -36,22 +36,22 @@ case "$1" in
     ;;
   查詢|status)
     if [ $# -lt 2 ]; then
-      echo "用法: tradfri 查詢 <名稱>"
+      echo "usage: tradfri status <name>"
       exit 1
     fi
     QNAME=$(map_name "$2")
     exec mcporter call tradfri.get_status "name=$QNAME"
     ;;
   *)
-    # 第一個參數是名稱，第二個是動作
+    # first arg is the name, second is the action
     NAME=$(map_name "$1")
     if [ $# -lt 2 ]; then
-      echo "用法: tradfri <名稱> <動作>"
+      echo "usage: tradfri <name> <action>"
       exit 1
     fi
     ACTION="$2"
 
-    # 「全部」→ 逐個執行所有名稱
+    # "all lights" → run for every alias in sequence
     if [ "$NAME" = "全部" ] || [ "$NAME" = "全部燈" ] || [ "$NAME" = "所有燈" ]; then
       NAMES="客廳 客廳電視牆 沙發燈 客廳聚光燈 客廳閱讀燈 客廳展示燈 玄關 玄關畫廊 玄關電箱 玄關主燈 融蠟燈 餐廳 餐桌燈 餐廳軌道燈 主臥室 次臥室 走道燈 衣櫥燈 立燈 小夜燈"
       shift 1  # remove NAME
@@ -70,33 +70,33 @@ case "$1" in
         ;;
       亮度|brightness)
         if [ $# -lt 3 ]; then
-          echo "用法: tradfri $NAME 亮度 <0-100>"
+          echo "usage: tradfri $NAME brightness <0-100>"
           exit 1
         fi
-        # 百分比(0-100) → 0-254
+        # percent (0-100) → 0-254
         VAL=$3
         if [ "$VAL" -le 100 ] 2>/dev/null; then
           VAL=$(( VAL * 254 / 100 ))
         fi
         exec mcporter call tradfri.control_by_name "name=$NAME" state=true "brightness=$VAL"
         ;;
-      色溫)
+      色溫|color_temp|colour_temp|temp)
         if [ $# -lt 3 ]; then
-          echo "用法: tradfri $NAME 色溫 暖/冷"
+          echo "usage: tradfri $NAME temp warm/cool"
           exit 1
         fi
         case "$3" in
           暖|warm) mcporter call tradfri.control_by_name "name=$NAME" state=true > /dev/null 2>&1; exec mcporter call tradfri.set_color_temp "name=$NAME" direction=warm ;;
           冷|cool) mcporter call tradfri.control_by_name "name=$NAME" state=true > /dev/null 2>&1; exec mcporter call tradfri.set_color_temp "name=$NAME" direction=cool ;;
-          *) echo "色溫方向：暖 或 冷"; exit 1 ;;
+          *) echo "colour direction: warm or cool"; exit 1 ;;
         esac
         ;;
       顏色|color)
         if [ $# -lt 3 ]; then
-          echo "用法: tradfri $NAME 顏色 紅/綠/藍/橙/黃/紫/粉"
+          echo "usage: tradfri $NAME color red/green/blue/orange/yellow/purple/pink"
           exit 1
         fi
-        # 中文顏色 → 英文
+        # Chinese colour names → English
         case "$3" in
           紅|紅色) COLOR=red ;;
           綠|綠色) COLOR=green ;;
@@ -107,14 +107,14 @@ case "$1" in
           粉|粉色|粉紅) COLOR=pink ;;
           暖白) COLOR=warm_white ;;
           冷白) COLOR=cool_white ;;
-          *) COLOR="$3" ;;  # 直接傳英文
+          *) COLOR="$3" ;;  # pass English directly
         esac
         mcporter call tradfri.control_by_name "name=$NAME" state=true > /dev/null 2>&1
         exec mcporter call tradfri.set_color "name=$NAME" "color=$COLOR"
         ;;
       *)
-        echo "未知動作: $ACTION"
-        echo "支援: 開, 關, 亮度 <值>, 色溫 暖/冷, 顏色 紅/綠/藍/橙/黃/紫/粉"
+        echo "unknown action: $ACTION"
+        echo "supported: on, off, brightness <val>, temp warm/cool, color red/green/blue/orange/yellow/purple/pink"
         exit 1
         ;;
     esac

@@ -22,7 +22,7 @@ SHELL = /bin/sh
 MKDIR = mkdir
 CC=gcc
 
-abs_builddir = /Users/otakubar/Developer/homekit-cli/kc_tradfri_mcp/vendor/dtlssocket/DTLSSocket/tinydtls/sha2
+abs_builddir = /Users/marcin/work/tradfri_mcp/vendor/dtlssocket/DTLSSocket/tinydtls/sha2
 top_builddir = ..
 top_srcdir:= ..
 

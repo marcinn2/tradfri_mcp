@@ -1,97 +1,95 @@
-# 在 macOS 上透過 DTLS 連接 IKEA TRADFRI Gateway -- 九個坑的血淚史
+# Connecting to the IKEA TRADFRI Gateway via DTLS on macOS — Nine Pitfalls, One Hard-Won Chronicle
 
-> **English summary:** This document records every pitfall encountered while establishing a DTLS + CoAP connection to an IKEA TRADFRI E1526 gateway on macOS using Python. Covers 9 issues including OpenSSL 3 AES-CCM incompatibility, macOS AF_INET6 socket behavior, TinyDTLS C source patches (sequence dedup reset, renegotiation_info bypass), pytradfri pydantic model incompatibility, and aiocoap credential URI formatting. Includes working minimal code examples and a complete debugging methodology appendix. The document is written in Traditional Chinese.
+This document records every pitfall encountered while establishing a DTLS + CoAP connection to a TRADFRI E1526 gateway on macOS using Python, along with the root cause and fix for each one. If nine pitfalls sounds like a lot, I assure you — each one made me believe the previous one was the last.
 
-本文記錄了在 macOS 上以 Python 建立 DTLS + CoAP 連線至 TRADFRI E1526 gateway 所踩到的所有坑，以及每個坑的根本原因與解法。如果你覺得「九個坑」聽起來很多，我向你保證，每一個都讓我以為前一個已經是最後一個了。
+**Final goal achieved**: list all devices (lights, sockets, remotes), groups, and scenes under the gateway without relying on the pytradfri model layer. Sounds simple, right? Ha.
 
-**最終達成目標**：列出 gateway 下所有設備（燈具、插座、遙控器）、群組、場景，不依賴 pytradfri model 層。聽起來簡單吧？哈。
+**Libraries used**: [DTLSSocket 0.2.3](https://github.com/mclunis/DTLSSocket) (Cython wrapper around TinyDTLS) + [aiocoap](https://github.com/chrysn/aiocoap)
 
-**使用的函式庫**：[DTLSSocket 0.2.3](https://github.com/mclunis/DTLSSocket)（TinyDTLS 的 Cython 封裝）+ [aiocoap](https://github.com/chrysn/aiocoap)
-
-目標讀者：想在 macOS 上寫自訂 TRADFRI client，但發現範例程式碼靜默失敗或一直 timeout 的開發者。歡迎加入俱樂部。
+Target audience: developers who want to write a custom TRADFRI client on macOS but find that sample code silently fails or times out indefinitely. Welcome to the club.
 
 ---
 
-## 環境
+## Environment
 
-| 元件 | 版本 / 說明 |
-|------|------------|
-| OS | macOS 15（Apple Silicon）|
-| Python | 3.9（系統版，`/usr/bin/python3`）|
-| DTLSSocket | 0.2.3（從原始碼 build）|
-| TinyDTLS | 隨 DTLSSocket 附帶 |
-| pytradfri | 最新 pip 版本 |
-| aiocoap | 最新 pip 版本 |
-| Gateway 型號 | IKEA TRADFRI E1526 |
-| Gateway 韌體 | 1.21.x |
+| Component | Version / Notes |
+|-----------|----------------|
+| OS | macOS 15 (Apple Silicon) |
+| Python | 3.9 (system, `/usr/bin/python3`) |
+| DTLSSocket | 0.2.3 (built from source) |
+| TinyDTLS | bundled with DTLSSocket |
+| pytradfri | latest pip version |
+| aiocoap | latest pip version |
+| Gateway model | IKEA TRADFRI E1526 |
+| Gateway firmware | 1.21.x |
 
 ---
 
-## #1 -- OpenSSL 3 不支援 `TLS_PSK_WITH_AES_128_CCM_8`（開局就被打臉）
+## #1 — OpenSSL 3 does not support `TLS_PSK_WITH_AES_128_CCM_8` (punched in the face at the opening)
 
-### 症狀
-使用 **libcoap**（例如 `coap-client` 或 aiocoap 的 libcoap backend）：
+### Symptom
+Using **libcoap** (e.g. `coap-client` or aiocoap's libcoap backend):
 
 ```
 DTLS_ALERT_HANDSHAKE_FAILURE
 ```
 
-握手在 cipher 協商階段立刻失敗。連手都還沒握到就被甩開了。
+The handshake fails immediately at cipher negotiation. Rejected before the handshake even begins.
 
-### 根本原因
-TRADFRI gateway 只支援兩組 DTLS cipher suite：
-- `TLS_PSK_WITH_AES_128_CCM_8`（0xC0A8）
-- `TLS_ECDHE_ECDSA_WITH_AES_128_CCM_8`（0xC0AC）
+### Root cause
+The TRADFRI gateway supports only two DTLS cipher suites:
+- `TLS_PSK_WITH_AES_128_CCM_8` (0xC0A8)
+- `TLS_ECDHE_ECDSA_WITH_AES_128_CCM_8` (0xC0AC)
 
-兩者都用 **AES-CCM**，而 OpenSSL 3.x 已將 AES-CCM 從預設 cipher provider 中移除。任何基於 OpenSSL 3 建置的 DTLS stack（Homebrew `libcoap`、aiocoap 的 libcoap backend 等）都無法完成握手。就是這麼絕情。
+Both use **AES-CCM**, which OpenSSL 3.x removed from its default cipher provider. Any DTLS stack built against OpenSSL 3 (Homebrew `libcoap`, aiocoap's libcoap backend, etc.) cannot complete the handshake.
 
-### 解法
-改用 **TinyDTLS**。TinyDTLS 是自包含的 C 函式庫，自帶 AES-CCM 實作，完全不依賴 OpenSSL。DTLSSocket 把 TinyDTLS 封裝成可從 Python 呼叫的 Cython extension。
+### Fix
+Switch to **TinyDTLS**. TinyDTLS is a self-contained C library with its own AES-CCM implementation that has no OpenSSL dependency. DTLSSocket wraps TinyDTLS as a Cython extension callable from Python.
 
 ---
 
-## #2 -- Cython 未執行導致 build 失敗（歡迎來到 C extension 地獄）
+## #2 — Build fails because Cython was never run (welcome to C extension hell)
 
-### 症狀
+### Symptom
 ```
 clang: error: no such file or directory: 'DTLSSocket/dtls.c'
 ```
 
-### 根本原因
-DTLSSocket 0.2.3 的 repo 只有 `dtls.pyx`，沒有預先編譯的 `dtls.c`。直接執行 `python setup.py develop` 時，編譯器找不到 `.c` 檔。有 `.pyx` 但沒有 `.c`，這就像有食譜但沒有廚房。
+### Root cause
+The DTLSSocket 0.2.3 repo only ships `dtls.pyx`, not the pre-generated `dtls.c`. Running `python setup.py develop` directly fails because the compiler has no `.c` file to work with. You have the recipe but no kitchen.
 
-### 解法
-先安裝 Cython，再手動將 `.pyx` 編譯成 `.c`，最後才 build：
+### Fix
+Install Cython first, compile `.pyx` to `.c` manually, then build:
 
 ```bash
 pip3 install --user cython
-~/.local/bin/cython DTLSSocket/dtls.pyx   # 產生 dtls.c
-python3 setup.py develop --user            # 編譯 dtls.c → .so
+~/.local/bin/cython DTLSSocket/dtls.pyx   # generates dtls.c
+python3 setup.py develop --user            # compiles dtls.c → .so
 ```
 
-> 注意：DTLSSocket 0.2.3 使用 `# cython: language_level=2`，Cython 3 會有警告但仍可正常 build。
+> Note: DTLSSocket 0.2.3 uses `# cython: language_level=2`; Cython 3 will warn but still builds fine.
 
 ---
 
-## #3 -- `APIFactory.generate_psk()` 靜默回傳 security code 原值（最溫柔的背刺）
+## #3 — `APIFactory.generate_psk()` silently returns the security code unchanged (the gentlest backstab)
 
-### 症狀
-呼叫 `pytradfri` 的 `APIFactory.init(psk=SECURITY_CODE)` 後再呼叫 `generate_psk(SECURITY_CODE)`，回傳值等於 security code 本身。存入 PSK 檔的「psk」欄位實際上是 security code，後續連線全部失敗。什麼錯誤都不報，就是靜靜地不工作。
+### Symptom
+After calling pytradfri's `APIFactory.init(psk=SECURITY_CODE)` and then `generate_psk(SECURITY_CODE)`, the return value equals the security code itself. The `psk` field written to the PSK file is actually the security code, and all subsequent connections fail silently.
 
-### 根本原因
-`APIFactory` 內部邏輯：
+### Root cause
+`APIFactory` internal logic:
 
 ```python
 async def generate_psk(self, security_code):
-    if not self._psk:       # ← 由這個判斷守門
+    if not self._psk:       # ← this guard decides everything
         ...
-    return self._psk        # ← 若 _psk 已設定則直接回傳，不發任何網路請求
+    return self._psk        # ← if _psk is already set, return it directly without any network request
 ```
 
-呼叫 `APIFactory.init(host=..., psk_id=..., psk=SECURITY_CODE)` 會把 `self._psk` 設為 security code。`if not self._psk` 為 False，`generate_psk` 直接回傳 security code，根本沒有向 gateway 請求新的 PSK。API 設計就是這麼...有創意。
+Calling `APIFactory.init(host=..., psk_id=..., psk=SECURITY_CODE)` sets `self._psk` to the security code. `if not self._psk` is False, so `generate_psk` returns the security code directly — no request to the gateway, no new PSK generated. Creative API design.
 
-### 解法
-打算產生新 PSK 時，`APIFactory.init` 的 `psk` 參數必須傳 `None`：
+### Fix
+When generating a new PSK, pass `None` for the `psk` parameter in `APIFactory.init`:
 
 ```python
 factory = await APIFactory.init(host=GATEWAY_IP, psk_id=identity, psk=None)
@@ -100,26 +98,26 @@ psk = await factory.generate_psk(SECURITY_CODE)
 
 ---
 
-## #4 -- macOS 的 AF_INET6 socket 收不到 IPv4 UDP 回應（平台差異的溫柔陷阱）
+## #4 — macOS AF_INET6 socket does not receive IPv4 UDP responses (a platform-specific trap)
 
-### 症狀
-以 aiocoap（tinydtls transport）連接 IPv4 gateway：
+### Symptom
+Connecting to an IPv4 gateway via aiocoap (tinydtls transport):
 
 ```
 aiocoap.error.ConRetransmitsExceeded
 ```
 
-client 持續送出封包，但完全收不到任何回應——即使用 Wireshark / tcpdump 可以確認 gateway 有回應。封包在那裡，你也在那裡，但你們就是不在同一個世界。
+The client keeps sending packets but receives no response — even though Wireshark/tcpdump confirms the gateway is replying. The packets are there. You are there. But you're in different worlds.
 
-### 根本原因
-DTLSSocket（以及 aiocoap 的 tinydtls transport）內部建立的是 **AF_INET6** socket，以 IPv4-mapped IPv6 格式（`::ffff:192.168.x.x`）傳遞位址。
+### Root cause
+DTLSSocket (and aiocoap's tinydtls transport) internally creates an **AF_INET6** socket and passes addresses in IPv4-mapped IPv6 format (`::ffff:192.168.x.x`).
 
-在 **macOS** 上，kernel **不會**自動將 IPv4 UDP 回應解封裝後投遞給 AF_INET6 socket（Linux 會這樣做）。Gateway 回傳純 IPv4 UDP 封包，macOS 找不到對應的 socket，就靜默丟棄。
+On **macOS**, the kernel does **not** automatically unwrap IPv4 UDP responses and deliver them to an AF_INET6 socket (Linux does this). The gateway replies with a plain IPv4 UDP packet, macOS finds no matching socket, and silently drops it.
 
-tcpdump 看得到 gateway 的回應，但 AF_INET6 socket 永遠收不到。那種「我明明看到你回了但程式說沒收到」的崩潰感，只有親身經歷才懂。
+tcpdump can see the gateway's response; the AF_INET6 socket never does. The despair of watching packets arrive and having the program claim nothing came — you have to live it to understand it.
 
-### 解法
-手動建立 **AF_INET** socket 作為底層傳輸。在 `write_cb` 中，把 `::ffff:` 前綴去掉再呼叫 `sendto`：
+### Fix
+Create an **AF_INET** socket manually as the underlying transport. In `write_cb`, strip the `::ffff:` prefix before calling `sendto`:
 
 ```python
 sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -129,11 +127,11 @@ sock.bind(('0.0.0.0', 0))
 def write_cb(addr, data):
     host = addr[0].split('%')[0]
     if host.startswith('::ffff:'):
-        host = host[7:]          # IPv4-mapped → 純 IPv4
+        host = host[7:]          # IPv4-mapped → plain IPv4
     return sock.sendto(bytes(data), (host, addr[1]))
 ```
 
-把 `sock.recvfrom` 收到的原始 bytes 回傳給 TinyDTLS 時，再加回 `::ffff:` 前綴：
+When feeding raw bytes from `sock.recvfrom` back to TinyDTLS, re-add the `::ffff:` prefix:
 
 ```python
 data, addr = sock.recvfrom(4096)
@@ -142,81 +140,81 @@ d.handleMessageAddr('::ffff:' + addr[0], addr[1], data)
 
 ---
 
-## #5 -- `Connection` 物件立即被 GC，送出 `close_notify`（最離譜的一個）
+## #5 — `Connection` object is immediately GC'd, sending `close_notify` (the most absurd one)
 
-### 症狀
-`d.connect(...)` 回傳後，TinyDTLS **立刻**送出 DTLS Alert `close_notify`（level=1 warning, desc=0），在 server 任何回應到達之前就關閉連線。就像剛撥出電話就掛斷一樣。
+### Symptom
+After `d.connect(...)` returns, TinyDTLS **immediately** sends a DTLS Alert `close_notify` (level=1 warning, desc=0), closing the connection before any server response arrives. Like hanging up the phone right after dialling.
 
-封包 trace：
+Packet trace:
 ```
 SEND Handshake 77B   ← ClientHello
-EVENT code=0x01DC    ← DTLS_EVENT_CONNECT 觸發
-SEND Alert level=1 desc=0   ← close_notify！（不應該）
-RECV 60B             ← ServerHello 姍姍來遲，已太晚
+EVENT code=0x01DC    ← DTLS_EVENT_CONNECT fires
+SEND Alert level=1 desc=0   ← close_notify! (should not happen)
+RECV 60B             ← ServerHello arrives too late
 ```
 
-### 根本原因
-`d.connect()` 回傳一個 `Connection` 物件。若回傳值未被變數接收，Python 立刻 GC 它。`Connection.__dealloc__` 呼叫 `dtls_reset_peer()`，後者呼叫 `dtls_destroy_peer(ctx, peer, DTLS_DESTROY_CLOSE)`，送出 `close_notify`。
+### Root cause
+`d.connect()` returns a `Connection` object. If the return value is not assigned to a variable, Python immediately GCs it. `Connection.__dealloc__` calls `dtls_reset_peer()`, which calls `dtls_destroy_peer(ctx, peer, DTLS_DESTROY_CLOSE)`, sending `close_notify`.
 
-`close_notify` 搶先 DTLS 握手送達，直接終止 session。一個被垃圾回收器殺死的網路連線，這大概是我職業生涯中最荒謬的 bug。
+The `close_notify` races ahead of the DTLS handshake and terminates the session. A network connection killed by the garbage collector — probably the most absurd bug of my career.
 
-相關 Cython 程式碼（`dtls.pyx`）：
+Relevant Cython code (`dtls.pyx`):
 ```python
 cdef class Connection(Session):
     def __dealloc__(self):
         peer = tdtls.dtls_get_peer(self.d.ctx, &self.session)
         if peer:
-            tdtls.dtls_reset_peer(self.d.ctx, peer)   # ← 送出 close_notify
+            tdtls.dtls_reset_peer(self.d.ctx, peer)   # ← sends close_notify
 ```
 
-### 解法
-**一定要**把 `d.connect()` 的回傳值指派給變數，讓 `Connection` 存活：
+### Fix
+**Always** assign the return value of `d.connect()` to a variable to keep `Connection` alive:
 
 ```python
-conn = d.connect('::ffff:192.168.x.x', 5684, 0, 0)   # ← 必須指派
+conn = d.connect('::ffff:192.168.x.x', 5684, 0, 0)   # ← must be assigned
 ```
 
 ---
 
-## #6 -- TinyDTLS 把 ServerHello 誤判為重複封包丟棄（record seq=0 碰撞的悲劇）
+## #6 — TinyDTLS misidentifies ServerHello as a duplicate and drops it (record seq=0 collision)
 
-### 症狀
-收到 `HelloVerifyRequest`、送出帶 cookie 的第二個 `ClientHello` 後，握手卡住。`handle_handshake_msg` 從未被呼叫到 `ServerHello`。最終在 retransmit 的 `ServerHello` 抵達時，因狀態不對而觸發 handshake_failure。
+### Symptom
+After receiving `HelloVerifyRequest` and sending the second `ClientHello` with a cookie, the handshake stalls. `handle_handshake_msg` is never called for `ServerHello`. Eventually when a retransmitted `ServerHello` arrives, the wrong state triggers handshake_failure.
 
-加入 debug 後的 trace：
+Debug trace:
 ```
 RECV 60B  hs=3  ← HelloVerifyRequest   (record seq=0, mseq=0)
 SEND 109B hs=1  ← ClientHello+cookie
 RECV 101B hs=2  ← ServerHello          (record seq=0, mseq=1)
-  → 靜默丟棄！（去重機制認為 seq=0 已見過）
-RECV 25B  hs=14 ← ServerHelloDone      (mseq=2，進 reorder buffer 等待）
+  → silently dropped! (dedup logic considers seq=0 already seen)
+RECV 25B  hs=14 ← ServerHelloDone      (mseq=2, buffered in reorder queue)
 RECV 101B hs=2  ← ServerHello retransmit (record seq=2, mseq=1)
-  → 這次被處理，但狀態機已混亂
+  → processed this time, but state machine is now confused
 SEND Alert level=2 desc=40  ← handshake_failure
 ```
 
-### 根本原因
-TinyDTLS 用 **per-security-context 的 sequence number bitfield**（`security->cseq`）來偵測重複封包。`HelloVerifyRequest`（第一個 server flight）與 `ServerHello`（第二個 server flight）**都使用 record sequence number 0**，因為 gateway 在兩個 flight 之間重置了 record sequence counter。
+### Root cause
+TinyDTLS uses a **per-security-context sequence number bitfield** (`security->cseq`) to detect duplicate packets. Both `HelloVerifyRequest` (first server flight) and `ServerHello` (second server flight) **use record sequence number 0**, because the gateway resets its record sequence counter between flights.
 
-`ServerHello`（seq=0）在 `HelloVerifyRequest`（seq=0）處理過後抵達：
+`ServerHello` (seq=0) arrives after `HelloVerifyRequest` (seq=0) was already processed:
 ```c
 int64_t seqn_diff = pkt_seq_nr - security->cseq.cseq;  // = 0 - 0 = 0
 if (seqn_diff == 0) {
-    return 0;  // 丟棄：「重複封包」
+    return 0;  // drop: "duplicate packet"
 }
 ```
 
-`ServerHello` 被靜默丟棄。狀態機停在 `DTLS_STATE_CLIENTHELLO`。`ServerHelloDone`（mseq=2）因為 `mseq_r` 還停在 1，被放進 reorder buffer 等待。就像排隊時前面的人消失了，後面的人全部卡住。
+`ServerHello` is silently dropped. The state machine stays at `DTLS_STATE_CLIENTHELLO`. `ServerHelloDone` (mseq=2) is buffered waiting because `mseq_r` is still at 1. Like a queue where the person ahead disappears and everyone behind gets stuck.
 
-### 修法（修改 TinyDTLS 原始碼 `dtls.c`）
-在 `DTLS_HT_HELLO_VERIFY_REQUEST` 處理成功後，重置 sequence 去重狀態，讓 server 下一個 flight（從 seq=0 開始）不被誤殺：
+### Fix (patch TinyDTLS source `dtls.c`)
+After successfully processing `DTLS_HT_HELLO_VERIFY_REQUEST`, reset the sequence deduplication state so the server's next flight (starting from seq=0) is not falsely dropped:
 
 ```c
 case DTLS_HT_HELLO_VERIFY_REQUEST:
     err = check_server_hello_verify_request(ctx, peer, data, data_length);
     if (err < 0) { ... }
 
-    /* 重置 seq 去重：server 下一個 flight 的 record seq 從 0 重新開始 */
+    /* reset seq dedup: server's next flight restarts record seq from 0 */
     dtls_security_params(peer)->cseq.bitfield = 0;
 
     break;
@@ -224,30 +222,30 @@ case DTLS_HT_HELLO_VERIFY_REQUEST:
 
 ---
 
-## #7 -- TinyDTLS 預設強制要求 `renegotiation_info`，但 TRADFRI gateway 不送（標準之爭）
+## #7 — TinyDTLS requires `renegotiation_info` by default, but TRADFRI gateway doesn't send it (a standards dispute)
 
-### 症狀
-修完 #5 和 #6 後，`check_server_hello` 仍然失敗，ServerHello 處理完就立刻送出 fatal alert，session 被關閉。本以為勝利在望，結果又被絆了一跤。
+### Symptom
+After fixing #5 and #6, `check_server_hello` still fails — ServerHello is processed and immediately followed by a fatal alert closing the session. Victory in sight, then tripped again.
 
-加入 debug 後：
+With debug output:
 ```
 DEBUG check_server_hello data_length=88
 DEBUG dtls_check_tls_extension returned -552  ← fatal HANDSHAKE_FAILURE
 ```
 
-`-552` 解碼為 `dtls_alert_fatal_create(DTLS_ALERT_HANDSHAKE_FAILURE)`
-（`-(2 * 256 + 40) = -552`）。
+`-552` decodes to `dtls_alert_fatal_create(DTLS_ALERT_HANDSHAKE_FAILURE)`
+(`-(2 * 256 + 40) = -552`).
 
-### 根本原因
-TinyDTLS 的 `default_user_parameters` 預設值：
+### Root cause
+TinyDTLS `default_user_parameters` defaults:
 ```c
 .force_extended_master_secret = 1,
 .force_renegotiation_info     = 1,
 ```
 
-`dtls_check_tls_extension` 裡的 `check_forced_extensions` 會驗證兩者。TRADFRI gateway 的 `ServerHello` **不包含** `renegotiation_info` extension（0xFF01）。Gateway 是透過在 `ClientHello` 的 cipher list 裡接受 `TLS_EMPTY_RENEGOTIATION_INFO_SCSV` 偽 cipher 來符合 RFC 5746，但不在 `ServerHello` 中回應這個 extension。技術上合法，但 TinyDTLS 不買帳。
+`check_forced_extensions` inside `dtls_check_tls_extension` validates both. The TRADFRI gateway's `ServerHello` **does not include** the `renegotiation_info` extension (0xFF01). The gateway signals RFC 5746 compliance via `TLS_EMPTY_RENEGOTIATION_INFO_SCSV` in the ClientHello cipher list, without echoing the extension in ServerHello. Technically valid — TinyDTLS disagrees.
 
-`force_renegotiation_info = 1` 且 `config->renegotiation_info == 0` 時：
+With `force_renegotiation_info = 1` and `config->renegotiation_info == 0`:
 ```c
 if (config->user_parameters.force_renegotiation_info) {
     if (!config->renegotiation_info) {
@@ -256,33 +254,32 @@ if (config->user_parameters.force_renegotiation_info) {
 }
 ```
 
-### 修法（修改 TinyDTLS 原始碼 `dtls.c`）
-將 `default_user_parameters` 的兩個強制檢查都關閉：
+### Fix (patch TinyDTLS source `dtls.c`)
+Disable both forced checks in `default_user_parameters`:
 
 ```c
 static const dtls_user_parameters_t default_user_parameters = {
     ...
-    .force_extended_master_secret = 0,   // 原本是 1
-    .force_renegotiation_info     = 0,   // 原本是 1
+    .force_extended_master_secret = 0,   // was 1
+    .force_renegotiation_info     = 0,   // was 1
 };
 ```
 
-> Gateway 確實有送 `extended_master_secret` extension（0x0017），所以那個
-> 檢查本來就會過。連接已知且可信的本地 gateway 時，兩個都設為 0 是安全的。
+> The gateway does send the `extended_master_secret` extension (0x0017), so that check would have passed anyway. Both set to 0 is safe when connecting to a known, trusted local gateway.
 
 ---
 
-## #8 -- pytradfri 最新版與 gateway 韌體 1.21.x 的 pydantic 不相容（壓垮駱駝的最後一根稻草）
+## #8 — Latest pytradfri is incompatible with gateway firmware 1.21.x via pydantic (the straw that broke the camel's back)
 
-### 症狀
-使用 `pip install pytradfri` 安裝最新版，執行任何 device 列舉時拋出：
+### Symptom
+After installing `pip install pytradfri`, any device enumeration throws:
 
 ```
 pydantic.error_wrappers.ValidationError: N validation errors
-  - field required (type=value_error.missing)  ← 欄位如 15025, 15015, 3.3, 3.9
+  - field required (type=value_error.missing)  ← fields like 15025, 15015, 3.3, 3.9
 ```
 
-或（pydantic v2）：
+Or (pydantic v2):
 
 ```
 pydantic_core._pydantic_core.ValidationError: N validation errors for ...
@@ -290,19 +287,19 @@ pydantic_core._pydantic_core.ValidationError: N validation errors for ...
     Field required [type=missing, ...]
 ```
 
-### 根本原因
-pytradfri 的最新版本把 gateway 回傳的原始 JSON 透過 pydantic model 解析，而這些 model 是針對較新韌體設計的，包含 gateway 韌體 1.21.x **不會回傳**的欄位（如 `15025`、`15015`、`3.3`、`3.9`）。
+### Root cause
+Recent pytradfri versions parse raw gateway JSON through pydantic models designed for newer firmware. These models expect fields (e.g. `15025`, `15015`, `3.3`, `3.9`) that gateway firmware 1.21.x does **not** return.
 
-pydantic 預設情況下 `Field required` 表示必填欄位缺失，整個 model 解析直接失敗，沒有 fallback。library 說「我需要這個欄位」，gateway 說「我沒有」，然後就沒有然後了。
+pydantic's `Field required` means mandatory field missing; the entire model fails with no fallback. The library says "I need this field." The gateway says "I don't have it." End of story.
 
-### 解法
-**完全放棄 pytradfri 的 model 層**，改用 aiocoap 直接送 CoAP GET，並自行以 dict key 解析 JSON 回應。有時候最好的抽象層就是沒有抽象層：
+### Fix
+**Abandon the pytradfri model layer entirely.** Use aiocoap to send CoAP GET directly and parse the JSON response by dict key. Sometimes the best abstraction layer is no abstraction layer:
 
 ```python
 import aiocoap, json
 
 ctx = await aiocoap.Context.create_client_context()
-# ... 載入 credentials（見 #9）
+# ... load credentials (see #9)
 
 async def get(ctx, path):
     uri = f"coaps://{GATEWAY_IP}{path}"
@@ -317,39 +314,39 @@ for did in device_ids:
     # ...
 ```
 
-Gateway 的 CoAP key 為純整數字串（`"9001"`、`"5850"` 等），直接取 dict key 即可，不依賴任何 model 驗證。
+Gateway CoAP keys are plain integer strings (`"9001"`, `"5850"`, etc.) — read them directly from the dict, no model validation needed.
 
 ---
 
-## #9 -- aiocoap credentials URI 不能帶 port 號（壓軸的驚喜）
+## #9 — aiocoap credential URI must not include a port number (the grand finale)
 
-### 症狀
-用 `ctx.client_credentials.load_from_dict()` 設定 PSK 憑證時，CoAP 請求拋出：
+### Symptom
+When configuring PSK credentials with `ctx.client_credentials.load_from_dict()`, CoAP requests throw:
 
 ```
 aiocoap.error.CredentialsMissingError:
   No suitable credentials for coaps://192.168.x.x/15001
 ```
 
-即使 PSK 正確、位址正確，每次都失敗。到了第九個坑的時候，你已經對「明明什麼都對但就是不行」這種事免疫了。
+Correct PSK, correct address — fails every time. By pitfall nine you're immune to "everything looks right but it doesn't work."
 
-### 根本原因
-`load_from_dict` 的 key 是用來匹配請求 URI 的 glob pattern。設定：
+### Root cause
+The key in `load_from_dict` is a glob pattern matched against the request URI. Configuring:
 
 ```python
 ctx.client_credentials.load_from_dict({
-    "coaps://192.168.x.x:5684/*": { ... }   # ← 帶了 :5684
+    "coaps://192.168.x.x:5684/*": { ... }   # ← includes :5684
 })
 ```
 
-但 aiocoap 內部構造的請求 URI 是 `coaps://192.168.x.x/15001`（預設 port 5684 不會寫進 URI）。兩者不匹配，找不到憑證。
+But aiocoap internally constructs request URIs as `coaps://192.168.x.x/15001` — the default port 5684 is not written into the URI. The patterns don't match, credentials are not found.
 
-### 解法
-credential key 的 URI **不要帶 port**：
+### Fix
+Do **not** include the port in the credential key URI:
 
 ```python
 ctx.client_credentials.load_from_dict({
-    f"coaps://{GATEWAY_IP}/*": {    # ← 不帶 port
+    f"coaps://{GATEWAY_IP}/*": {    # ← no port
         "dtls": {
             "psk":             psk.encode(),
             "client-identity": identity.encode(),
@@ -358,22 +355,22 @@ ctx.client_credentials.load_from_dict({
 })
 ```
 
-aiocoap 的 URI 匹配規則：只有當請求 URI 與 credential key pattern 的 scheme、host、port（或 scheme 預設 port）和 path 全部對上，才算命中。`coaps` 的預設 port 是 5684，所以 `coaps://host/*` 會匹配 `coaps://host/path`，但 `coaps://host:5684/*` 不會。是的，這很反直覺。是的，我也覺得。
+aiocoap's URI matching: a credential key pattern matches a request URI only when scheme, host, port (or scheme default port), and path all align. The default port for `coaps` is 5684, so `coaps://host/*` matches `coaps://host/path`, but `coaps://host:5684/*` does not. Yes, this is counterintuitive.
 
 ---
 
-## 所有修改一覽（又名「留給後來者的地圖」）
+## Summary of all changes ("the map left for those who come after")
 
-| # | 檔案 | 修改內容 |
-|---|------|---------|
-| 1 | `dtls.c` | `check_server_hello_verify_request` 後加 `cseq.bitfield = 0` |
-| 2 | `dtls.c` | `default_user_parameters` 的 `force_extended_master_secret` 與 `force_renegotiation_info` 改為 0 |
-| 3 | 呼叫端程式碼 | `conn = d.connect(...)` 必須指派，防止 GC 觸發 `close_notify` |
-| 4 | 呼叫端程式碼 | 使用 AF_INET socket，`write_cb` 去除 `::ffff:` 前綴（macOS 專用）|
+| # | File | Change |
+|---|------|--------|
+| 1 | `dtls.c` | Add `cseq.bitfield = 0` after `check_server_hello_verify_request` |
+| 2 | `dtls.c` | Set `force_extended_master_secret` and `force_renegotiation_info` to 0 in `default_user_parameters` |
+| 3 | call-site code | Assign `conn = d.connect(...)` to prevent GC from triggering `close_notify` |
+| 4 | call-site code | Use AF_INET socket; strip `::ffff:` prefix in `write_cb` (macOS only) |
 
 ---
 
-## 可運作的最小 DTLS 握手範例（九個坑之後的獎品）
+## Minimal working DTLS handshake example (the prize after nine pitfalls)
 
 ```python
 import socket
@@ -386,7 +383,7 @@ sock.bind(('0.0.0.0', 0))
 
 GATEWAY_IP    = "192.168.x.x"
 GATEWAY_PORT  = 5684
-SECURITY_CODE = b"<16 位 Security Code>"
+SECURITY_CODE = b"<16-character Security Code>"
 
 received_data = []
 
@@ -402,20 +399,20 @@ def read_cb(addr, data):
 
 def event_cb(level, code):
     if code == 0x01DE:
-        print("DTLS 握手完成")
+        print("DTLS handshake complete")
 
 d = dtls.DTLS(
     read=read_cb, write=write_cb, event=event_cb,
     pskId=b"Client_identity",
     pskStore={b"Client_identity": SECURITY_CODE, b"": SECURITY_CODE},
 )
-conn = d.connect(f'::ffff:{GATEWAY_IP}', GATEWAY_PORT, 0, 0)  # 必須指派！
+conn = d.connect(f'::ffff:{GATEWAY_IP}', GATEWAY_PORT, 0, 0)  # must be assigned!
 
 for _ in range(10):
     try:
         data, addr = sock.recvfrom(4096)
         d.handleMessageAddr(f'::ffff:{addr[0]}', addr[1], data)
-        if received_data:   # read_cb 被呼叫 = 應用層資料到了
+        if received_data:   # read_cb was called = application-layer data arrived
             break
     except socket.timeout:
         break
@@ -423,91 +420,91 @@ for _ in range(10):
 
 ---
 
-## PSK 產生（在 DTLS session 上送 CoAP POST）
+## PSK generation (CoAP POST over a DTLS session)
 
-握手以 `Client_identity` + security code 完成後，透過 CoAP POST 註冊永久 identity。這是整個流程中少數「照著做就會動」的部分：
+After completing the handshake as `Client_identity` + security code, register a permanent identity via CoAP POST. This is one of the few parts of the process that just works:
 
 ```
 POST coaps://192.168.x.x:5684/15011/9063
 Content-Format: application/json
-{"9090": "<自訂 identity 名稱>"}
+{"9090": "<custom identity name>"}
 
 → 2.01 Created
-{"9091": "<產生的 PSK>", "9029": "1.21.xxxx"}
+{"9091": "<generated PSK>", "9029": "1.21.xxxx"}
 ```
 
-把回傳的 identity + PSK 存起來，之後所有連線都用這組，不再使用 `Client_identity` + security code。
+Store the returned identity + PSK; use them for all subsequent connections instead of `Client_identity` + security code.
 
 ---
 
-## 最終可運作的完整方案（又名「倖存者的勝利宣言」）
+## Final working solution ("the survivor's victory declaration")
 
-**目標**：列出 gateway 下所有設備、群組、場景。
+**Goal**: list all devices, groups, and scenes under the gateway.
 
-**採用方案**：
-- DTLS 握手與 PSK 產生：手動用 DTLSSocket（修補過的 TinyDTLS），搭配 AF_INET socket（繞過 macOS 的 AF_INET6 限制）
-- 設備列舉：aiocoap `Context.create_client_context()` + `load_from_dict()` 直接發 CoAP GET，自行解析 JSON key
-- **完全不使用 pytradfri 的 model 層**（因 #8 的 pydantic 不相容）
+**Approach**:
+- DTLS handshake and PSK generation: manual DTLSSocket (patched TinyDTLS) with AF_INET socket (bypassing macOS AF_INET6 limitations)
+- Device enumeration: aiocoap `Context.create_client_context()` + `load_from_dict()` sending CoAP GET directly, parsing JSON keys manually
+- **No pytradfri model layer** (pydantic incompatibility from #8)
 
-這個方案：
-- 不需要修改 aiocoap 本體
-- 不依賴 pytradfri 的 pydantic model
-- DTLS PSK 只需產生一次，存入 JSON 檔後反覆使用
+This solution:
+- Requires no changes to aiocoap itself
+- Has no dependency on pytradfri's pydantic models
+- Generates the DTLS PSK once, stores it in a JSON file, reuses it indefinitely
 
-如果你走到這一步，恭喜你。剩下的都是坦途（跟前面比的話）。
+If you made it this far, congratulations. The rest is straightforward (compared to what came before).
 
-## 關於 pytradfri / aiocoap 在 macOS 的整合說明（給不信邪的人的歷史記錄）
+## Notes on pytradfri / aiocoap integration on macOS (historical record for the sceptics)
 
-`pytradfri` 透過 `aiocoap` 連線，`aiocoap` 有自己的 tinydtls transport（`aiocoap.transports.tinydtls`）。該 transport 內部建立自己的 DTLSSocket，使用 AF_INET6 socket，在 macOS 上會踩到 **#4**（IPv4 回應收不到）。
+`pytradfri` connects via `aiocoap`, which has its own tinydtls transport (`aiocoap.transports.tinydtls`). That transport creates its own DTLSSocket using an AF_INET6 socket, which hits **#4** (IPv4 responses not received) on macOS.
 
-即使解決了 #4，pytradfri 的 model 層仍會因 **#8**（pydantic 欄位不相容）而失敗。最終選擇完全繞過 pytradfri，採用上述方案。別說我沒警告你。
+Even after fixing #4, pytradfri's model layer still fails due to **#8** (pydantic field incompatibility). The final decision was to bypass pytradfri entirely. Don't say you weren't warned.
 
-若要繼續使用 pytradfri 路線，可考慮：
-1. **修改 aiocoap 的 tinydtls transport**，改用 AF_INET + 純 IPv4 位址。
-2. **pin pytradfri 到較舊版本**，或 patch model 去掉 required 欄位的強制驗證。
-3. **改在 Linux 上執行**，Linux 的 AF_INET6 / IPv4-mapped 行為正常，不需要特別處理 #4。
-
----
-
-*測試對象：TRADFRI gateway 韌體 1.21.0051*
+If you want to stay on the pytradfri path, options include:
+1. **Patch aiocoap's tinydtls transport** to use AF_INET + plain IPv4 addresses.
+2. **Pin pytradfri to an older version**, or patch its models to remove the mandatory field validation.
+3. **Run on Linux**, where AF_INET6 / IPv4-mapped behaviour works correctly and #4 is not an issue.
 
 ---
 
-## 附錄 -- 除錯的思路與過程（又名「偵探小說，但主角一直猜錯」）
+*Tested against TRADFRI gateway firmware 1.21.0051*
 
-這份附錄記錄的不是「答案」，而是「怎麼找到答案」。每個問題的第一個症狀通常只有一句錯誤訊息，後面的偵查過程才是真正費時的地方。如果你好奇一個工程師如何優雅地（並不）花掉一整個週末，請繼續往下看。
+---
 
-### 第一階段：選擇 DTLS 函式庫（aka 第一印象就是錯的）
+## Appendix — Debugging methodology ("a detective story where the detective keeps guessing wrong")
 
-最初嘗試用 aiocoap 的預設 backend（libcoap），直接拿 pytradfri 範例跑，得到 `DTLS_ALERT_HANDSHAKE_FAILURE`。
+This appendix is not about answers — it's about how to find them. Each problem's first symptom is usually one error message; the investigation that follows is where the real time goes. If you're curious how an engineer can spend an entire weekend in a controlled fashion (spoiler: not controlled), read on.
 
-第一直覺是「PSK 或位址填錯了」，花了一些時間確認參數都對之後，開始往 cipher 方向想。用 `openssl ciphers` 列舉 OpenSSL 3 支援的清單，找不到 `TLS_PSK_WITH_AES_128_CCM_8`。查了 OpenSSL changelog 確認 AES-CCM 在 3.0 被移出 default provider。這才意識到這不是設定問題，而是 **函式庫根本不支援這個 cipher**。
+### Phase 1: choosing a DTLS library (first impressions are wrong)
 
-從這裡轉向 TinyDTLS / DTLSSocket。故事才剛開始。
+Started with aiocoap's default backend (libcoap), ran the pytradfri example, got `DTLS_ALERT_HANDSHAKE_FAILURE`.
 
-### 第二階段：確認封包真的有收到（aka 薛丁格的 UDP 封包）
+First instinct: "wrong PSK or address." Spent time confirming parameters were correct, then started looking at ciphers. Listed OpenSSL 3 supported ciphers with `openssl ciphers` — no `TLS_PSK_WITH_AES_128_CCM_8`. Checked the OpenSSL changelog, confirmed AES-CCM was removed from the default provider in 3.0. Realised this wasn't a configuration problem — the library simply **doesn't support this cipher**.
 
-DTLSSocket 裝好後，aiocoap 仍然 timeout（`ConRetransmitsExceeded`）。此時有兩個可能：一是程式設定錯，二是封包根本沒到達或沒被收到。
+Pivoted to TinyDTLS / DTLSSocket. The story had barely begun.
 
-**關鍵動作：開 tcpdump 看封包。** 永遠是正確的第一步。
+### Phase 2: confirming packets are actually received ("Schrödinger's UDP packet")
+
+After installing DTLSSocket, aiocoap still timed out (`ConRetransmitsExceeded`). Two possibilities: wrong configuration, or packets genuinely not arriving or not being received.
+
+**Key action: run tcpdump.** Always the right first step.
 
 ```bash
 tcpdump -i any udp port 5684
 ```
 
-tcpdump 清楚看到：client 送出 ClientHello、gateway 回了 HelloVerifyRequest，但 Python 程式完全沒反應。這排除了「gateway 不通」的可能，問題一定在 socket 的接收層。
+tcpdump clearly showed: client sent ClientHello, gateway replied with HelloVerifyRequest, Python program showed no sign of receiving it. This ruled out "gateway not reachable." The problem was in the socket's receive layer.
 
-接著寫了一個最小測試，繞過 aiocoap，直接用 `socket.recvfrom` 接收，發現 AF_INET socket 能收到回應，AF_INET6 收不到。在 macOS 上驗證了 IPv4-mapped 行為與 Linux 不同的假設。
+Wrote a minimal test bypassing aiocoap, using `socket.recvfrom` directly. AF_INET socket received the response; AF_INET6 did not. Confirmed on macOS that IPv4-mapped behaviour differs from Linux.
 
-### 第三階段：close_notify 搶先送出（aka 「我沒叫你掛電話啊」）
+### Phase 3: close_notify sent before handshake ("I didn't tell you to hang up")
 
-解決了 socket 問題後，用自己的 AF_INET socket 搭配 DTLSSocket，第一次看到 ClientHello 真的被送出去，也收到了 HelloVerifyRequest。但緊接著 **在收到任何 server 回應之前**，DTLSSocket 自己送出了 `close_notify`。
+After fixing the socket issue, using a custom AF_INET socket with DTLSSocket, ClientHello was actually being sent and HelloVerifyRequest received. But immediately **before any server response arrived**, DTLSSocket sent `close_notify` itself.
 
-這很反直覺。ClientHello 剛出去，握手根本還沒開始，為什麼要關連線？
+This was counterintuitive. ClientHello just left, the handshake hadn't started — why close the connection?
 
-首先懷疑是 event callback 裡的程式碼觸發了什麼，但 callback 只有一行 print，不可能。接著想到：**也許不是主動行為，而是解構子**。有些 bug 不是你寫出來的，是你沒寫出來的。
+First suspicion: code in the event callback. Callback was one print statement. Impossible. Next thought: **maybe this isn't an active action but a destructor**. Some bugs aren't caused by what you wrote — they're caused by what you didn't write.
 
-翻了 `dtls.pyx` 的 `Connection` class，看到 `__dealloc__` 呼叫 `dtls_reset_peer`，而 `dtls_reset_peer` 的實作是：
+Checked `dtls.pyx` `Connection` class, found `__dealloc__` calling `dtls_reset_peer`, whose implementation is:
 
 ```c
 void dtls_reset_peer(...) {
@@ -515,63 +512,63 @@ void dtls_reset_peer(...) {
 }
 ```
 
-`DTLS_DESTROY_CLOSE` 會送出 `close_notify`。再往上追：`d.connect()` 的回傳值在測試程式裡沒有被接收，Python 立刻 GC `Connection` 物件。整條鏈清楚了。
+`DTLS_DESTROY_CLOSE` sends `close_notify`. Tracing back up: `d.connect()` return value was not assigned in the test program, so Python immediately GC'd the `Connection` object. The whole chain was clear.
 
-### 第四階段：握手卡在 ServerHello 之後（aka 最長的除錯馬拉松）
+### Phase 4: handshake stalls after ServerHello ("the longest debugging marathon")
 
-修完 close_notify 之後，握手有更多進展，但最終仍以 `handshake_failure` 結束，而且 PSK callback 從未被呼叫。這代表狀態機根本沒走到 ClientKeyExchange 那一步。
+After fixing close_notify, the handshake progressed further but still ended with `handshake_failure`, and the PSK callback was never invoked. This meant the state machine never reached ClientKeyExchange.
 
-此時的 trace 看起來像：
+Trace at this point:
 ```
 ← HelloVerifyRequest
 → ClientHello+cookie
-← ServerHello          （沒有觸發任何 callback）
-← ServerHelloDone      （沒有觸發任何 callback）
+← ServerHello          (triggered no callback)
+← ServerHelloDone      (triggered no callback)
 ← ServerHello retransmit
 → Alert handshake_failure
 ```
 
-**第一個懷疑：PSK callback 被呼叫但沒有印出來。** 重新確認 stderr 有合併，確認 .so 有重新 build，沒有問題。
+**First suspicion**: PSK callback was called but output not appearing. Confirmed stderr was merged, confirmed .so was rebuilt. No issue.
 
-**第二個懷疑：peer 根本沒被找到。** 在 `dtls_handle_message` 裡加了 `fprintf(stderr, "PEER FOUND/NOT FOUND")`，結果每次都是 FOUND，排除。
+**Second suspicion**: peer not found at all. Added `fprintf(stderr, "PEER FOUND/NOT FOUND")` inside `dtls_handle_message`. Result: FOUND every time. Ruled out.
 
-**第三個懷疑：`handle_handshake_msg` 根本沒被呼叫。** 在函式入口加了 debug print，發現 ServerHello 和 ServerHelloDone 都**沒有**觸發這個函式，只有 HelloVerifyRequest 和後來的 retransmit ServerHello 有。
+**Third suspicion**: `handle_handshake_msg` not being called at all. Added debug print at function entry. Confirmed: ServerHello and ServerHelloDone did **not** trigger this function; only HelloVerifyRequest and the later retransmitted ServerHello did.
 
-這讓問題變得很具體：**為什麼同樣是封包、同樣找得到 peer，有的封包能進 `handle_handshake_msg`，有的不行？** 就像明明都買了門票，有的人能進場有的不行。
+This made the problem concrete: **why do some packets reach `handle_handshake_msg` and others don't, even though the peer is found and the packets arrive?** Like having the right ticket but being refused entry.
 
-中間還有什麼過濾機制？往上查呼叫路徑，找到了 sequence deduplication 的邏輯。手動解碼 HelloVerifyRequest 和 ServerHello 的 record header，發現兩者的 **record sequence number 都是 0**。
+What filter sits in between? Traced the call path upward, found the sequence deduplication logic. Manually decoded the record headers of HelloVerifyRequest and ServerHello, found both had **record sequence number 0**.
 
 ```python
 hvr_seq = int.from_bytes(hvr_bytes[5:11], 'big')   # → 0
-sh_seq  = int.from_bytes(sh_bytes[5:11],  'big')   # → 0（！）
+sh_seq  = int.from_bytes(sh_bytes[5:11],  'big')   # → 0 (!)
 ```
 
-這才有了完整解釋：gateway 在兩個 flight 之間重置了 record sequence counter，而 TinyDTLS 的去重機制沒有意識到這是兩個不同的 flight。
+Complete explanation: the gateway resets its record sequence counter between flights, and TinyDTLS's deduplication logic doesn't recognise these as two different flights.
 
-### 第五階段：ServerHello 被處理但仍然失敗（aka 「還有？！」）
+### Phase 5: ServerHello processed but still fails ("there's more?!")
 
-加了 `cseq.bitfield = 0` 的修法後，ServerHello 終於進入 `handle_handshake_msg`，但立刻回傳錯誤，仍然沒有送出 ClientKeyExchange。就在你以為看到光明的時候，隧道又轉了一個彎。
+After adding the `cseq.bitfield = 0` fix, ServerHello finally entered `handle_handshake_msg`, but returned an error immediately — still no ClientKeyExchange sent. Just as you see the light, the tunnel turns again.
 
-在 `check_server_hello` 的出口加了 debug，印出 `dtls_check_tls_extension` 的回傳值：`-552`。
+Added debug at `check_server_hello` exit, printed the return value of `dtls_check_tls_extension`: `-552`.
 
-解碼 `-552`：`-(2 * 256 + 40)`，對照 TinyDTLS 的 alert code 表，`40 = 0x28 = DTLS_ALERT_HANDSHAKE_FAILURE`，level 2 = fatal。
+Decoding `-552`: `-(2 * 256 + 40)`. Looking up TinyDTLS alert codes: `40 = 0x28 = DTLS_ALERT_HANDSHAKE_FAILURE`, level 2 = fatal.
 
-`dtls_check_tls_extension` 回傳 HANDSHAKE_FAILURE 的地方只有一個 `error:` label，往回追看哪個 `goto error` 被觸發。用 debug print 縮小到 `check_forced_extensions`，看到兩個 force 檢查：`force_extended_master_secret` 與 `force_renegotiation_info`。
+Only one `error:` label in `dtls_check_tls_extension`. Traced back to find which `goto error` fired. Used debug prints to narrow it down to `check_forced_extensions`, where two force checks exist: `force_extended_master_secret` and `force_renegotiation_info`.
 
-手動解碼 ServerHello 的 extension list（最後 6 bytes：`00 04 00 17 00 00`），只有 `0x0017`（extended_master_secret），沒有 `0xFF01`（renegotiation_info）。
+Manually decoded the ServerHello extension list (last 6 bytes: `00 04 00 17 00 00`) — only `0x0017` (extended_master_secret), no `0xFF01` (renegotiation_info).
 
-確認了就是 `force_renegotiation_info` 的檢查在踢人。查 RFC 5746，理解 gateway 用 `TLS_EMPTY_RENEGOTIATION_INFO_SCSV` 替代 extension 的做法是合法的，TinyDTLS 的強制要求過於嚴格。兩邊都沒錯，但就是不相容。人生不也常常這樣嗎。
+Confirmed: `force_renegotiation_info` check was the culprit. Looked up RFC 5746, understood that the gateway's use of `TLS_EMPTY_RENEGOTIATION_INFO_SCSV` instead of the extension is perfectly valid. Neither side is wrong — they're just incompatible. Life is sometimes like that.
 
-### 除錯方法總結（又名「下次會更快的謊言」）
+### Debugging methodology summary ("lies I tell myself about being faster next time")
 
-這次除錯過程用到的關鍵技術：
+Key techniques used throughout:
 
-1. **tcpdump 優先**：在懷疑任何函式庫行為之前，先確認封包層面的事實。「gateway 有沒有回應」這個問題要在網路層確認，不要依賴函式庫的 timeout 訊息。
+1. **tcpdump first**: before questioning any library behaviour, confirm the facts at the packet level. "Did the gateway respond?" is a network-layer question — don't rely on library timeout messages.
 
-2. **在 C 原始碼加 `fprintf(stderr, ...)`**：TinyDTLS 的 `dtls_set_log_level` 產生的 log 不夠細，遇到無法解釋的行為時，直接在懷疑的函式入口加 `fprintf` 再重新 build，是最快的確認方式。粗暴但有效。
+2. **`fprintf(stderr, ...)` in C source**: TinyDTLS's `dtls_set_log_level` output isn't granular enough. When behaviour is inexplicable, add `fprintf` at the entry point of the suspect function and rebuild. Crude but fast.
 
-3. **手動解碼封包 bytes**：DTLS record header 和 handshake header 格式固定，用 Python 幾行就能解出 record seq、handshake type、message seq。遇到「為什麼這個封包沒被處理」的問題，先解碼再對照原始碼，比 strace 直覺很多。
+3. **Manually decode packet bytes**: the DTLS record and handshake header formats are fixed. A few lines of Python decode record seq, handshake type, and message seq. When facing "why wasn't this packet processed?", decode first, then correlate with source code — far more intuitive than strace.
 
-4. **追 GC 導致的副作用**：Python 呼叫 C extension 時，物件的 dealloc 可能觸發 C 層的副作用（如送出網路封包）。碰到「我沒叫它做這件事，它自己做了」的情況，優先懷疑 GC timing。這種 bug 教科書不會教你。
+4. **Trace GC-triggered side effects**: when Python calls a C extension, object dealloc can trigger C-level side effects (like sending network packets). When something happens that you didn't ask for, suspect GC timing first. This bug doesn't appear in textbooks.
 
-5. **把錯誤碼解碼成有意義的值**：TinyDTLS 的函式回傳值是 `-(level * 256 + code)` 的編碼形式，直接看 `-552` 沒意義，但解碼成 `(2, 40)` -> `(fatal, handshake_failure)` 後馬上知道方向。永遠不要相信一個看不懂的數字。
+5. **Decode error codes into meaningful values**: TinyDTLS return values use the encoding `-(level * 256 + code)`. `-552` means nothing at a glance; `(2, 40)` → `(fatal, handshake_failure)` gives you direction immediately. Never trust a number you can't read.

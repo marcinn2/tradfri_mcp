@@ -1,13 +1,13 @@
 """
-設備拓撲管理：讀寫 devices.json 與 aliases.json。
+Device topology management: reads/writes devices.json and aliases.json.
 
-devices.json 由 refresh() 產生，aliases.json 由 user 手動維護。
+devices.json is produced by refresh(); aliases.json is maintained manually by the user.
 """
 import json
 from typing import Optional
 from config import DEVICES_FILE, ALIASES_FILE
 
-# ── CoAP key 常數 ──────────────────────────────────────────────────────────
+# ── CoAP key constants ─────────────────────────────────────────────────────
 
 KEY_NAME       = "9001"
 KEY_ID         = "9003"
@@ -21,10 +21,13 @@ KEY_COLOR_TEMP = "5711"
 KEY_COLOR_X    = "5709"
 KEY_COLOR_Y    = "5710"
 KEY_MEMBERS    = "9018"
+KEY_DEV_INFO   = "3"     # ROOT_DEVICE_INFO sub-object
+KEY_BATTERY    = "9"     # battery level 0–100 (battery-powered devices only)
+KEY_POWER_SRC  = "6"     # power source: 1=mains, 3=battery, …
 
 APP_TYPE = {0: "remote", 2: "light", 3: "plug", 4: "blind", 6: "repeater"}
 
-# CIE XY 色彩對照表（已 scale 到 0–65535）
+# CIE XY colour table (scaled to 0–65535)
 COLOR_MAP: dict[str, tuple[int, int]] = {
     "red":        (45914, 19661),
     "green":      (19661, 45914),
@@ -37,14 +40,14 @@ COLOR_MAP: dict[str, tuple[int, int]] = {
     "pink":       (39321, 16711),
 }
 
-MIRED_MIN = 250   # ~4000K 冷白
-MIRED_MAX = 454   # ~2200K 暖白
+MIRED_MIN = 250   # ~4000K cool white
+MIRED_MAX = 454   # ~2200K warm white
 
 
-# ── devices.json 讀寫 ──────────────────────────────────────────────────────
+# ── devices.json I/O ───────────────────────────────────────────────────────
 
 def load_devices() -> dict:
-    """載入 devices.json。若不存在回傳空結構。"""
+    """Load devices.json. Returns an empty structure if the file doesn't exist."""
     if not DEVICES_FILE.exists():
         return {"devices": [], "groups": [], "scenes": {}}
     return json.loads(DEVICES_FILE.read_text())
@@ -54,35 +57,35 @@ def save_devices(data: dict) -> None:
     DEVICES_FILE.write_text(json.dumps(data, ensure_ascii=False, indent=2))
 
 
-# ── aliases.json 讀寫 ──────────────────────────────────────────────────────
+# ── aliases.json I/O ───────────────────────────────────────────────────────
 
 def load_aliases() -> dict:
-    """載入 aliases.json。若不存在回傳空 dict。"""
+    """Load aliases.json. Returns an empty dict if the file doesn't exist."""
     if not ALIASES_FILE.exists():
         return {}
     return json.loads(ALIASES_FILE.read_text())
 
 
-# ── 名稱解析 ───────────────────────────────────────────────────────────────
+# ── name resolution ────────────────────────────────────────────────────────
 
 def resolve(name: str) -> Optional[dict]:
     """
-    將 alias 或設備名稱解析為 {"type": "group"|"device", "id": int}。
-    優先查 aliases.json，再做 devices.json 名稱模糊匹配。
+    Resolve an alias or device name to {"type": "group"|"device", "id": int}.
+    Checks aliases.json first, then fuzzy-matches device names in devices.json.
     """
     aliases = load_aliases()
 
-    # 完全匹配 alias
+    # exact alias match
     if name in aliases:
         return aliases[name]
 
-    # 大小寫不敏感匹配
+    # case-insensitive match
     name_lower = name.lower()
     for key, val in aliases.items():
         if key.lower() == name_lower:
             return val
 
-    # fallback：devices.json 名稱匹配
+    # fallback: match against devices.json names
     data = load_devices()
     for g in data.get("groups", []):
         if g.get("name", "").lower() == name_lower:
@@ -94,7 +97,7 @@ def resolve(name: str) -> Optional[dict]:
     return None
 
 
-# ── 掃描結果解析 ──────────────────────────────────────────────────────────
+# ── scan result parsing ────────────────────────────────────────────────────
 
 def parse_device(raw: dict) -> dict:
     info: dict = {
@@ -103,6 +106,9 @@ def parse_device(raw: dict) -> dict:
         "type":      APP_TYPE.get(raw.get(KEY_TYPE), str(raw.get(KEY_TYPE))),
         "reachable": bool(raw.get(KEY_REACHABLE, 0)),
     }
+    dev_info = raw.get(KEY_DEV_INFO, {})
+    if KEY_BATTERY in dev_info:
+        info["battery"] = dev_info[KEY_BATTERY]
     if KEY_LIGHT in raw:
         lights = raw[KEY_LIGHT]
         if lights:

@@ -1,109 +1,107 @@
-# 自製 MCP Server 接進 OpenClaw：以 IKEA TRADFRI 智慧家居為例（踩坑全記錄）
+# Building a Custom MCP Server with OpenClaw: IKEA TRADFRI Smart Home Integration (Pitfalls and All)
 
-> **English summary:** End-to-end tutorial on building a custom MCP Server for IKEA TRADFRI smart home integration with OpenClaw. Covers: architecture design (why FastMCP + Docker + HTTP transport), CoAP device topology management (virtual rooms, alias system), 12 MCP tools (control, color temp, color, scenes, status, OBSERVE push notifications), OpenClaw integration via mcporter skill + wrapper script, and a complete testing strategy. Includes pitfalls specific to macOS Docker networking, 8B LLM tool-calling reliability, and the critical role of AGENTS.md. The document is written in Traditional Chinese.
+This document is a complete record of building a custom MCP Server on macOS, connecting it to an IKEA TRADFRI smart home gateway, and integrating it with the OpenClaw AI assistant so that natural language commands control lights, sockets, and scenes. If this sounds straightforward, congratulations — you've already been misled.
 
-本文記錄了一個完整的實作歷程：如何在 macOS 上打通 IKEA TRADFRI 智慧家居 gateway 的通訊層，並將控制能力包裝成 MCP Server，讓 OpenClaw AI assistant 能透過自然語言指令操控家中的燈具、插座與場景。如果你覺得這聽起來很直覺，那恭喜你，你已經被騙了。
+**By the end of this document you will be able to:**
+- Tell an AI "dim the living room a bit" and watch it actually happen (every success deserves a screenshot)
+- Understand why "just install the lib and run it" is completely impossible on this path
+- Build a reusable MCP server development and integration pattern
 
-**讀完本文，你能做到：**
-- 用自然語言叫 AI「把客廳的燈調暗一點」，燈真的會暗（每次成功都想截圖紀念）
-- 理解為什麼「直接裝 lib 跑起來」在這條路上完全不可行（是的，我也曾經這麼天真）
-- 建立一套可複用的 MCP server 開發與整合模式
-
-**本文不是官方文件的翻譯，是踩坑紀錄。** 官方文件會告訴你怎麼做，本文告訴你為什麼那樣做不會動。
+**This is not a translation of official docs — it's a record of pitfalls.** Official docs tell you what to do; this document tells you why that won't work.
 
 ---
 
-## 環境
+## Environment
 
-| 元件 | 規格 |
-|------|------|
-| 主機 | Mac Mini（Apple Silicon，macOS 15）|
-| AI 平台 | [OpenClaw](https://openclaw.ai) 2026.3.x |
-| 智慧家居 | IKEA TRADFRI gateway E1526，韌體 1.21.x |
-| 通訊協定 | CoAP over DTLS（CoAPS），port 5684 |
+| Component | Spec |
+|-----------|------|
+| Host | Mac Mini (Apple Silicon, macOS 15) |
+| AI platform | [OpenClaw](https://openclaw.ai) 2026.3.x |
+| Smart home | IKEA TRADFRI gateway E1526, firmware 1.21.x |
+| Protocol | CoAP over DTLS (CoAPS), port 5684 |
 | MCP framework | [FastMCP](https://github.com/jlowin/fastmcp) 3.x |
-| 容器 | Docker（Mac Mini 常駐服務）|
+| Container | Docker (persistent service on Mac Mini) |
 
 ---
 
-## 第一章：為什麼這條路走起來像荊棘密佈
+## Chapter 1: Why this path feels like walking through thorns
 
-### TRADFRI 不是你以為的那種 API
+### TRADFRI is not the kind of API you're thinking of
 
-IKEA TRADFRI gateway 不提供 REST API。沒有 `curl`，沒有 JSON over HTTP，什麼都沒有。它使用的是：
+The IKEA TRADFRI gateway does not provide a REST API. No `curl`, no JSON over HTTP, nothing like that. It uses:
 
-- **CoAP**（Constrained Application Protocol）：IoT 世界的 HTTP，但跑在 UDP 上，文件少得可憐
-- **DTLS 1.2**（Datagram TLS）：CoAP 的加密層，等同於 TLS 但用於 UDP，除錯難度翻倍
-- **PSK cipher**：`TLS_PSK_WITH_AES_128_CCM_8`，OpenSSL 3.x 不支援，是的你沒看錯
+- **CoAP** (Constrained Application Protocol): the HTTP of the IoT world, but over UDP, with sparse documentation
+- **DTLS 1.2** (Datagram TLS): CoAP's encryption layer, equivalent to TLS over UDP — debugging difficulty doubled
+- **PSK cipher**: `TLS_PSK_WITH_AES_128_CCM_8`, not supported by OpenSSL 3.x. Yes, you read that right.
 
-這意味著你不能用 `requests`、`httpx`、甚至 `aiohttp` 直接連它。你需要一個實作了 DTLS + AES-CCM 的 CoAP client。光是搞懂這件事就花了我一個下午。
+This means you cannot connect to it with `requests`, `httpx`, or even `aiohttp`. You need a CoAP client that implements DTLS + AES-CCM. Just understanding this took me an afternoon.
 
-### 既有函式庫的現況（又名「理想很豐滿，現實很骨感」）
+### State of existing libraries ("great expectations, harsh reality")
 
-| 函式庫 | 問題 |
-|--------|------|
-| `pytradfri`（官方 Python SDK）| 內部用 `aiocoap`，而 aiocoap 的 tinydtls transport 在 macOS 上有 socket 問題 |
-| `aiocoap`（預設 libcoap backend）| OpenSSL 3 不支援 AES-CCM，握手直接失敗 |
-| `DTLSSocket 0.2.3`（TinyDTLS wrapper）| 有多個 bug 需要 patch TinyDTLS C 原始碼才能在 macOS 上運作 |
+| Library | Problem |
+|---------|---------|
+| `pytradfri` (official Python SDK) | Internally uses `aiocoap`, whose tinydtls transport has a socket issue on macOS |
+| `aiocoap` (default libcoap backend) | OpenSSL 3 doesn't support AES-CCM; handshake fails immediately |
+| `DTLSSocket 0.2.3` (TinyDTLS wrapper) | Has multiple bugs requiring patches to TinyDTLS C source to work on macOS |
 
-完整的 DTLS 踩坑紀錄與修法，請見 [`docs/dtls-tradfri-pitfalls.md`](./dtls-tradfri-pitfalls.md)，本文不重複那些痛苦。
+The complete DTLS pitfall record and fixes are in [`docs/dtls-tradfri-pitfalls.md`](./dtls-tradfri-pitfalls.md). This document won't repeat that pain.
 
-**結論：DTLS 層打通後，捨棄 `pytradfri` 的 model 層（與 gateway 韌體不相容），改用 `aiocoap` 直接發 CoAP 請求，自行解析 JSON。** 有時候最好的框架就是沒有框架。
+**Conclusion: once the DTLS layer was working, drop `pytradfri`'s model layer (incompatible with gateway firmware), use `aiocoap` to send CoAP requests directly, and parse JSON manually.** Sometimes the best framework is no framework.
 
 ---
 
-## 第二章：架構設計（又名「為什麼要搞這麼多層」）
+## Chapter 2: Architecture design ("why so many layers?")
 
-### 整體架構
+### Overall architecture
 
 ```
-User（Telegram 訊息）
+User (Telegram message)
   ↓
-OpenClaw（Mac Mini 常駐，AI agent）
-  ↓  mcporter skill（OpenClaw 內建）
-mcporter CLI（MCP client）
-  ↓  HTTP（localhost:8765）
-tradfri-mcp（Docker container，FastMCP HTTP server）
-  ↓  CoAPS（aiocoap）
-TRADFRI gateway（192.168.x.x:5684）
+OpenClaw (Mac Mini persistent process, AI agent)
+  ↓  mcporter skill (OpenClaw built-in)
+mcporter CLI (MCP client)
+  ↓  HTTP (localhost:8765)
+tradfri-mcp (Docker container, FastMCP HTTP server)
+  ↓  CoAPS (aiocoap)
+TRADFRI gateway (192.168.x.x:5684)
   ↓  Zigbee
-燈具、插座、遙控器
+lights, sockets, remotes
 ```
 
-### 為什麼選這個架構（每個選擇背後都有一個故事）
+### Why this architecture (every choice has a story)
 
-**為什麼不用 pytradfri？**
+**Why not pytradfri?**
 
-`pytradfri` 最新版的 pydantic model 假設 gateway 有回傳 `15025`、`15015` 等欄位，但韌體 1.21.x 不會回傳這些欄位，導致每次呼叫都拋 `ValidationError`。patch 它比自己實作代價更高。有時候 "official SDK" 三個字是個陷阱。
+The latest pytradfri version assumes the gateway returns fields `15025`, `15015`, etc. in its pydantic models, but firmware 1.21.x doesn't return these fields, causing a `ValidationError` on every call. Patching it costs more than just implementing directly. Sometimes "official SDK" is a trap.
 
-**為什麼用 mcporter 而不是直接改 OpenClaw config？**
+**Why mcporter instead of editing OpenClaw config directly?**
 
-OpenClaw 沒有 `mcpServers` config 欄位（與 Claude Desktop 不同）。它的 MCP 整合走 **mcporter skill**：OpenClaw 的 AI agent 透過執行 `mcporter` CLI 來呼叫 MCP tools。這是 OpenClaw 官方推薦的第三方 MCP 整合方式。不是我選的路，但走通了。
+OpenClaw doesn't have an `mcpServers` config field (unlike Claude Desktop). Its MCP integration goes through the **mcporter skill**: OpenClaw's AI agent calls MCP tools by running the `mcporter` CLI. This is OpenClaw's officially recommended third-party MCP integration method. Not my choice, but it works.
 
-**為什麼用 Docker？**
+**Why Docker?**
 
-`tradfri-mcp` 需要：
-1. 常駐執行（維持 aiocoap event loop）
-2. 與 OpenClaw 解耦（獨立升版、重啟，互不干擾）
-3. 在 Mac Mini 上以服務形式管理
+`tradfri-mcp` needs to:
+1. Run persistently (maintain the aiocoap event loop)
+2. Be decoupled from OpenClaw (independent upgrades, restarts, no interference)
+3. Be managed as a service on Mac Mini
 
-Docker + `restart: unless-stopped` 是最乾淨的選擇。有些時候，「無聊的技術選型」就是最好的技術選型。
+Docker + `restart: unless-stopped` is the cleanest option. Sometimes the boring technology choice is the best one.
 
-**為什麼用 HTTP transport 而不是 stdio？**
+**Why HTTP transport instead of stdio?**
 
-stdio transport 每次 tool call 都需要啟動一個新的子 process。常駐的 aiocoap event loop 無法在 stdio 模式下維持。HTTP transport 讓 Docker container 持續跑，mcporter 直接打 HTTP 連進來。process-per-call 和 long-lived-connection 之間的選擇，在 IoT 場景下根本不是選擇。
+stdio transport starts a new subprocess for every tool call. A persistent aiocoap event loop cannot survive in stdio mode. HTTP transport lets the Docker container run continuously; mcporter connects via HTTP. Between process-per-call and long-lived-connection in an IoT scenario, there's really no choice.
 
 ---
 
-## 第三章：MCP Server 設計（終於進入正題了）
+## Chapter 3: MCP Server design (finally getting to the point)
 
-### 技術選型：FastMCP 3.x
+### Technology choice: FastMCP 3.x
 
-FastMCP 是目前最主流的 Python MCP server framework，理由很簡單——它讓你少寫很多樣板程式碼：
+FastMCP is currently the most widely used Python MCP server framework — it eliminates a lot of boilerplate:
 
-- FastMCP 1.0 已被併入官方 Python MCP SDK
-- FastMCP 3.x 持續獨立維護，每日下載量百萬次
-- 用 type hint + docstring 自動生成 MCP tool schema，無需手動定義
+- FastMCP 1.0 was merged into the official Python MCP SDK
+- FastMCP 3.x continues as an independent project with millions of daily downloads
+- Automatically generates MCP tool schemas from type hints + docstrings
 
 ```python
 from fastmcp import FastMCP
@@ -112,195 +110,193 @@ mcp = FastMCP("tradfri")
 
 @mcp.tool()
 async def control_group(group_id: int, brightness: int) -> str:
-    """控制群組亮度（0–254）。適用於整個房間的燈。"""
+    """Control group brightness (0–254). For a whole room of lights."""
     await coap_put(f"/15004/{group_id}", {"5851": brightness})
-    return f"群組 {group_id} 亮度設為 {brightness}"
+    return f"group {group_id} brightness set to {brightness}"
 ```
 
-### 設備拓撲管理（aka 人類語言 vs 機器語言的翻譯層）
+### Device topology management (the translation layer between human language and machine language)
 
-gateway 上的設備用數字 ID 識別，但 AI 需要知道「客廳 = group_id X」。沒有人會對 AI 說「把 65553 打開」。
+Devices on the gateway are identified by numeric IDs, but the AI needs to know "living room = group_id X". Nobody says "turn on 65553."
 
-**方案：`devices.json` + `aliases.json`**
+**Approach: `devices.json` + `aliases.json`**
 
 ```jsonc
-// devices.json（由 scripts/scan.py 自動產生，不手動維護）
+// devices.json (auto-generated by scripts/scan.py, not manually maintained)
 {
   "groups": [
-    {"id": 131079, "name": "GU10色溫", "state": true, "brightness": 200}
+    {"id": 131079, "name": "GU10 warm white", "state": true, "brightness": 200}
   ],
   "devices": [...]
 }
 
-// aliases.json（由 user 手動維護）
+// aliases.json (manually maintained by user)
 {
-  // 虛擬房間（組合多個 IKEA group + 獨立設備）
-  "客廳": {
+  // virtual room (combines multiple IKEA groups + individual devices)
+  "living_room": {
     "type": "virtual",
     "groups": [131079],
     "devices": [65545, 65553, 65554, 65555, 65556, 65572, 65573, 65574]
   },
-  // IKEA 原生群組
-  "主臥室": {"type": "group", "id": 131089},
-  // 設備清單（沒有 IKEA group 時用）
-  "餐廳軌道燈": {"type": "device_list", "ids": [65579, 65580, 65581]},
-  // 單一設備
-  "餐桌燈": {"type": "device", "id": 65551}
+  // native IKEA group
+  "master_bedroom": {"type": "group", "id": 131089},
+  // device list (when there's no IKEA group)
+  "dining_track_lights": {"type": "device_list", "ids": [65579, 65580, 65581]},
+  // single device
+  "dining_table_lamp": {"type": "device", "id": 65551}
 }
 ```
 
-**為什麼需要 `virtual` 類型？（又一個「IKEA 為什麼要這樣設計」的故事）**
+**Why does the `virtual` type exist? (another "why did IKEA design it this way?" story)**
 
-IKEA TRADFRI 的群組設計是依燈泡型號分類（「GU10色溫」、「GU10彩色」），而不是依房間分類。Apple Home 則按房間管理。如果你家客廳同時有 GU10 色溫燈、GU10 彩色燈和 E27 燈泡，那恭喜你，IKEA 把它們分成了三個群組。`virtual` 類型讓你把跨 IKEA group 的設備組合成邏輯上的「一個房間」，`control_by_name` 工具會自動展開並依序控制所有目標。
+IKEA TRADFRI groups are organised by bulb model ("GU10 warm white", "GU10 colour"), not by room. Apple Home organises by room. If your living room has GU10 warm white bulbs, GU10 colour bulbs, and E27 bulbs, IKEA has put them in three separate groups. The `virtual` type lets you combine cross-IKEA-group devices into a logical "room"; `control_by_name` automatically expands it and controls all targets in sequence.
 
-### MCP Tools 一覽（你的新遙控器上的按鈕）
+### MCP Tools overview
 
-| Tool | 說明 |
-|------|------|
-| `control_group` | 控制整個群組（開關、亮度）|
-| `control_device` | 控制單一設備 |
-| `control_by_name` | 以 alias 名稱控制（支援 virtual/device_list/group/device）|
-| `set_color_temp` | 調整色溫（暖/冷，支援「暖一點」語意）|
-| `set_color` | 設定顏色（紅/綠/藍/橙/黃...）|
-| `activate_scene` | 觸發場景 |
-| `get_status` | 查詢設備或群組當前狀態 |
-| `list_devices` | 列出所有設備/群組（含 alias）|
-| `list_aliases` | 列出所有 alias 名稱與類型（輕量，LLM 快速確認用）|
-| `refresh_devices` | 重新掃描 gateway，更新 devices.json |
-| `find_by_name` | 以名稱查找設備/群組 ID |
+| Tool | Description |
+|------|-------------|
+| `control_group` | Control an entire group (on/off, brightness) |
+| `control_device` | Control a single device |
+| `control_by_name` | Control by alias name (supports virtual/device_list/group/device) |
+| `set_color_temp` | Adjust colour temperature (warm/cool) |
+| `set_color` | Set colour (red/green/blue/orange/yellow...) |
+| `activate_scene` | Activate a scene |
+| `get_status` | Query current device or group state |
+| `list_devices` | List all devices/groups (with aliases) |
+| `list_aliases` | List all alias names and types (lightweight, for LLM quick-lookup) |
+| `refresh_devices` | Re-scan gateway, update devices.json |
+| `find_by_name` | Find device/group ID by name |
 
-### 色溫與顏色支援（數字背後的物理）
+### Colour temperature and colour support (the physics behind the numbers)
 
-**色溫（白光燈）**
+**Colour temperature (white light)**
 
-CoAP key `5711` 單位是 **Mireds**（不是 Kelvin）。為什麼不用大家都懂的 Kelvin？因為這是 IoT，不讓你舒服是基本原則：
+CoAP key `5711` is in **Mireds**, not Kelvin. Why not Kelvin, which everyone understands? Because this is IoT — making things inconvenient is a core feature:
 
 ```
 Mireds = 1,000,000 / Kelvin
 ```
 
-| Mireds | Kelvin | 感覺 |
+| Mireds | Kelvin | Feel |
 |--------|--------|------|
-| 250 | 4000K | 冷白 / 日光 |
-| 370 | 2700K | 暖白 / 黃光 |
-| 454 | 2200K | 超暖 / 燭光 |
+| 250 | 4000K | Cool white / daylight |
+| 370 | 2700K | Warm white / yellow |
+| 454 | 2200K | Very warm / candlelight |
 
-「調暖」= `mireds + 50`，「調冷」= `mireds - 50`，clamp 到 250--454。
+"Warmer" = `mireds + 50`, "cooler" = `mireds - 50`, clamped to 250–454.
 
-**顏色（彩色燈）**
+**Colour (colour bulbs)**
 
-CoAP key `5709`（X）、`5710`（Y），範圍 0--65535：
+CoAP keys `5709` (X) and `5710` (Y), range 0–65535:
 
-| 顏色 | X | Y |
-|------|---|---|
-| 紅 | 45914 | 19661 |
-| 綠 | 19661 | 45914 |
-| 藍 | 9830 | 3932 |
-| 橙 | 42163 | 25887 |
-| 黃 | 37449 | 37449 |
-| 暖白 | 30140 | 26870 |
+| Colour | X | Y |
+|--------|---|---|
+| red | 45914 | 19661 |
+| green | 19661 | 45914 |
+| blue | 9830 | 3932 |
+| orange | 42163 | 25887 |
+| yellow | 37449 | 37449 |
+| warm_white | 30140 | 26870 |
 
 ---
 
-## 第四章：OpenClaw 整合（把所有東西接起來的藝術）
+## Chapter 4: OpenClaw integration (the art of wiring everything together)
 
-### 安裝 mcporter
+### Install mcporter
 
-OpenClaw 已內建 mcporter skill（`/opt/homebrew/lib/node_modules/openclaw/skills/mcporter/`），但需要安裝對應的 binary：
+OpenClaw ships with a built-in mcporter skill (`/opt/homebrew/lib/node_modules/openclaw/skills/mcporter/`), but requires the corresponding binary:
 
 ```bash
-# 方法一：從 OpenClaw dashboard 的 Skills 頁點 Install
-# 方法二：手動
+# Option 1: click Install from the Skills page in the OpenClaw dashboard
+# Option 2: manual
 npm install -g mcporter
 ```
 
-裝好後，`openclaw skills check` 會顯示 `✓ ready   📦 mcporter`。
+After installation, `openclaw skills check` should show `✓ ready   📦 mcporter`.
 
-### 設定 mcporter 指向 tradfri-mcp
+### Configure mcporter to point at tradfri-mcp
 
 ```bash
 mcporter config add tradfri --url http://localhost:8765/mcp
 ```
 
-驗證（深呼吸，然後...）：
+Verify (deep breath, then...):
 
 ```bash
 mcporter list tradfri
-# → 列出 control_group, control_device, control_by_name, ...
+# → lists control_group, control_device, control_by_name, ...
 
-mcporter call tradfri.control_by_name name=客廳 brightness=80
-# → 客廳燈暗下來
+mcporter call tradfri.control_by_name name=living_room brightness=80
+# → living room lights dim
 ```
 
-> **注意**：mcporter 的 flag 是 `--url`，不是 `--http-url`。問我怎麼知道的。
+> **Note**: the mcporter flag is `--url`, not `--http-url`. Ask me how I know.
 
-### 建立 tradfri OpenClaw skill（給 AI 一份說明書）
+### Create a tradfri OpenClaw skill (give the AI a manual)
 
-OpenClaw skill 是一個 SKILL.md 檔，當 user 說出符合 triggers 的話時，OpenClaw 會將 SKILL.md 注入 LLM 的 context，讓 LLM 知道如何呼叫 mcporter。
+An OpenClaw skill is a SKILL.md file. When the user says something matching the skill's triggers, OpenClaw injects SKILL.md into the LLM's context so it knows how to call mcporter.
 
-這比把所有燈具 alias 寫進 system prompt 更乾淨——skill 只在需要時才載入。理論上很美，實際上...請見後面的踩坑。
+This is cleaner than dumping all light aliases into the system prompt — the skill only loads when needed. Beautiful in theory; see the pitfalls section for reality.
 
-建立目錄和檔案：
+Create the directory and files:
 
 ```bash
 mkdir -p ~/.openclaw/workspace/skills/tradfri/.clawhub
 ```
 
-`~/.openclaw/workspace/skills/tradfri/SKILL.md`：
+`~/.openclaw/workspace/skills/tradfri/SKILL.md`:
 
 ```markdown
 ---
 name: tradfri
-description: IKEA TRADFRI 智慧家居控制——透過 mcporter 控制燈具、插座與場景
+description: IKEA TRADFRI smart home control — control lights, sockets, and scenes via mcporter
 author: local
 version: 1.0.0
 triggers:
-  - "開燈"
-  - "關燈"
-  - "調光"
-  - "調亮"
-  - "調暗"
-  - "色溫"
+  - "turn on"
+  - "turn off"
+  - "dim"
+  - "brighten"
+  - "colour temp"
   - "tradfri"
   - "IKEA"
-  - "客廳燈"
-  - "臥室燈"
+  - "lights"
 ---
 
-# IKEA TRADFRI 智慧家居控制
+# IKEA TRADFRI smart home control
 
 ## How to use
 
-1. 先呼叫 `mcporter call tradfri.list_aliases` 取得可用名稱清單
-2. 根據清單選擇正確的名稱，呼叫對應的 tool
+1. Call `mcporter call tradfri.list_aliases` to get the list of available names
+2. Choose the correct name from the list and call the appropriate tool
 
 ## Available tools
 
-### 開關 / 亮度
-mcporter call tradfri.control_by_name name=<名稱> state=true/false
-mcporter call tradfri.control_by_name name=<名稱> brightness=<0-254>
+### On/off / brightness
+mcporter call tradfri.control_by_name name=<name> state=true/false
+mcporter call tradfri.control_by_name name=<name> brightness=<0-254>
 
-### 色溫
-mcporter call tradfri.set_color_temp name=<名稱> direction=warm/cool
+### Colour temperature
+mcporter call tradfri.set_color_temp name=<name> direction=warm/cool
 
-### 顏色（RGB 燈泡專用）
-mcporter call tradfri.set_color name=<名稱> color=red/green/blue/orange/yellow
+### Colour (RGB bulbs only)
+mcporter call tradfri.set_color name=<name> color=red/green/blue/orange/yellow
 
-### 查詢
-mcporter call tradfri.get_status name=<名稱>
+### Query
+mcporter call tradfri.get_status name=<name>
 ```
 
-`~/.openclaw/workspace/skills/tradfri/_meta.json`：
+`~/.openclaw/workspace/skills/tradfri/_meta.json`:
 
 ```json
 {
   "slug": "tradfri",
   "version": "1.0.0",
-  "description": "IKEA TRADFRI 智慧家居控制"
+  "description": "IKEA TRADFRI smart home light control"
 }
 ```
 
-`~/.openclaw/workspace/skills/tradfri/.clawhub/origin.json`：
+`~/.openclaw/workspace/skills/tradfri/.clawhub/origin.json`:
 
 ```json
 {
@@ -312,20 +308,20 @@ mcporter call tradfri.get_status name=<名稱>
 }
 ```
 
-重啟 OpenClaw gateway 後，`openclaw skills list` 應顯示 tradfri skill（`✓ ready`，source: `openclaw-workspace`）：
+After restarting the OpenClaw gateway, `openclaw skills list` should show the tradfri skill (`✓ ready`, source: `openclaw-workspace`):
 
 ```bash
 launchctl unload ~/Library/LaunchAgents/ai.openclaw.gateway.plist
 launchctl load  ~/Library/LaunchAgents/ai.openclaw.gateway.plist
 openclaw skills list | grep tradfri
-# ✓ ready   📦 tradfri   IKEA TRADFRI 智慧家居控制...   openclaw-workspace
+# ✓ ready   📦 tradfri   IKEA TRADFRI smart home...   openclaw-workspace
 ```
 
-### OpenClaw Gateway HTTP API（開發用，不是必須的）
+### OpenClaw Gateway HTTP API (for development, not required)
 
-OpenClaw gateway 預設監聽 `127.0.0.1:18789`。若要從外部程式（如 Claude Code 的 openclaw-mcp）呼叫，需啟用 HTTP API：
+OpenClaw gateway listens on `127.0.0.1:18789` by default. To call it from an external program (e.g. Claude Code's openclaw-mcp), enable the HTTP API:
 
-在 `~/.openclaw/openclaw.json` 加入：
+Add to `~/.openclaw/openclaw.json`:
 
 ```json
 {
@@ -341,11 +337,11 @@ OpenClaw gateway 預設監聽 `127.0.0.1:18789`。若要從外部程式（如 Cl
 }
 ```
 
-重啟 gateway 後，`POST http://127.0.0.1:18789/v1/chat/completions` 即可使用。
+After restarting the gateway, `POST http://127.0.0.1:18789/v1/chat/completions` is available.
 
-### 整合測試工具：openclaw-mcp（給懶得切 Telegram 的開發者）
+### Integration test tool: openclaw-mcp (for developers who don't want to switch to Telegram)
 
-安裝 [freema/openclaw-mcp](https://github.com/freema/openclaw-mcp) 作為 Claude Code 的 MCP server，讓 Claude Code 能直接向 OpenClaw 發訊息，無需透過 Telegram 轉述：
+Install [freema/openclaw-mcp](https://github.com/freema/openclaw-mcp) as a Claude Code MCP server so Claude Code can send messages directly to OpenClaw without going through Telegram:
 
 ```bash
 claude mcp add openclaw npx openclaw-mcp \
@@ -354,68 +350,68 @@ claude mcp add openclaw npx openclaw-mcp \
   -e OPENCLAW_TIMEOUT_MS=300000
 ```
 
-Token 在 `~/.openclaw/openclaw.json` 的 `gateway.auth.token` 欄位。
+The token is in `gateway.auth.token` in `~/.openclaw/openclaw.json`.
 
 ---
 
-## 第五章：測試策略（又名「如何確認燈真的亮了」）
+## Chapter 5: Testing strategy ("how to confirm the light actually turned on")
 
-### 階段一：MCP Server 單獨測試（不需要 PC / Ollama）
+### Phase 1: MCP server standalone testing (no OpenClaw / Ollama needed)
 
-**用 mcporter 直打（最快速的煙霧測試）：**
+**Direct mcporter calls (fastest smoke test):**
 
 ```bash
-# 確認 tools 有被正確定義
+# confirm tools are correctly defined
 mcporter list tradfri
 
-# 測試控制
+# test control
 mcporter call tradfri.list_aliases
-mcporter call tradfri.control_by_name name=客廳 brightness=50
-mcporter call tradfri.set_color_temp name=餐桌燈 direction=warm
+mcporter call tradfri.control_by_name name=living_room brightness=50
+mcporter call tradfri.set_color_temp name=dining_table_lamp direction=warm
 mcporter call tradfri.activate_scene group_id=131073 scene_id=196608
 
-# 查詢狀態
-mcporter call tradfri.get_status name=客廳
+# query state
+mcporter call tradfri.get_status name=living_room
 ```
 
-**用 MCP Inspector（有 Web UI，比較人性化）：**
+**MCP Inspector (web UI, more user-friendly):**
 
 ```bash
 npx @modelcontextprotocol/inspector http://localhost:8765/mcp
 ```
 
-開啟 `http://localhost:6274` 即可在瀏覽器中列出 tools、發 call、看 request/response。不用寫程式就能測試，懶人福音。
+Open `http://localhost:6274` to list tools, make calls, and inspect request/response in a browser. No code required.
 
-### 階段二：OpenClaw 整合測試（需要 Ollama 開機）
+### Phase 2: OpenClaw integration testing (requires Ollama running)
 
-**透過 Telegram：**
+**Via Telegram:**
 
-直接用正常 user 流程，觀察 OpenClaw 是否正確呼叫 mcporter。然後看著客廳的燈亮起來，感受一下「我做到了」的成就感。
+Use the normal user flow and observe whether OpenClaw correctly invokes mcporter. Then watch the living room lights respond and feel the satisfaction of having built something that actually works.
 
 ---
 
-## 第六章：部署（把它變成一個不會壞的東西，大概）
+## Chapter 6: Deployment ("making something that probably won't break")
 
-### 目錄結構
+### Directory structure
 
 ```
-kc_tradfri_mcp/
-├── server.py              # FastMCP server 主程式
-├── aliases.json           # user 自訂別名（含 virtual room）
-├── devices.json           # 設備清單（scan 產生，.gitignore）
-├── .tradfri_psk.json      # PSK 憑證（.gitignore）
-├── .env                   # 環境變數（.gitignore）
-├── .env.example           # 範本
+tradfri_mcp/
+├── server.py              # FastMCP server main entry point
+├── aliases.json           # user-defined aliases (including virtual rooms)
+├── devices.json           # device list (generated by scan, .gitignore)
+├── .tradfri_psk.json      # PSK credentials (.gitignore)
+├── .env                   # environment variables (.gitignore)
+├── .env.example           # template
 ├── Dockerfile
 ├── docker-compose.yml
 ├── pyproject.toml
 ├── README.md
 ├── scripts/
-│   ├── scan.py            # 掃描 gateway 設備
-│   └── gen_psk.py         # 產生 PSK 憑證
+│   ├── scan.py            # scan gateway devices
+│   └── gen_psk.py         # generate PSK credentials
 └── docs/
     ├── dtls-tradfri-pitfalls.md
-    └── openclaw-tradfri-mcp-tutorial.md  ← 本文
+    └── openclaw-tradfri-mcp-tutorial.md  ← this file
 ```
 
 ### Docker Compose
@@ -438,85 +434,85 @@ services:
     restart: unless-stopped
 ```
 
-### 環境變數
+### Environment variables
 
 ```bash
-# .env（不進 git）
+# .env (not committed to git)
 TRADFRI_GATEWAY_IP=192.168.x.x
 ```
 
-PSK identity 與 key 存在 `.tradfri_psk.json`（mount 進 container，不進 image）。秘密就該留在秘密的地方。
+PSK identity and key are stored in `.tradfri_psk.json` (mounted into the container, not baked into the image). Secrets belong in secret places.
 
 ---
 
-## 附錄 A：PSK 產生方式（入場券）
+## Appendix A: PSK generation (getting your entry pass)
 
-第一次使用前，需要向 gateway 申請一組 PSK（用 security code 換取長期憑證）。想像成用臨時通行證換一張員工證：
+Before first use, request a PSK from the gateway (exchange the security code for a long-term credential). Think of it as trading a temporary visitor pass for a permanent employee badge:
 
 ```bash
 export TRADFRI_GATEWAY_IP=192.168.x.x
-export TRADFRI_SECURITY_CODE=xxxxxxxxxxxxxxxx   # gateway 背面的碼
+export TRADFRI_SECURITY_CODE=xxxxxxxxxxxxxxxx   # code on the back of the gateway
 
 uv run python scripts/gen_psk.py
-# ✓ DTLS 握手完成，gateway 韌體：1.21.xxxx
-# ✓ PSK 已存入 .tradfri_psk.json
-#   identity: kc-tradfri-xxxxxxxx
+# ✓ DTLS handshake complete, gateway firmware: 1.21.xxxx
+# ✓ PSK saved to .tradfri_psk.json
+#   identity: tradfri-xxxxxxxx
 #   psk:      xxxx****
 ```
 
-`gen_psk.py` 的實作細節（DTLS + CoAP POST）請見 [`docs/dtls-tradfri-pitfalls.md`](./dtls-tradfri-pitfalls.md)。
+Implementation details of `gen_psk.py` (DTLS + CoAP POST) are in [`docs/dtls-tradfri-pitfalls.md`](./dtls-tradfri-pitfalls.md).
 
 ---
 
-## 附錄 B：設備掃描（認識你家有什麼）
+## Appendix B: Device scan (getting to know what's in your home)
 
 ```bash
 export TRADFRI_GATEWAY_IP=192.168.x.x
 uv run python scripts/scan.py
-# → 輸出所有 devices、groups、scenes 的 JSON
-# → 複製到 devices.json
+# → outputs JSON for all devices, groups, and scenes
+# → copy to devices.json
 ```
 
-建議初次部署時手動執行一次，之後可透過 `refresh_devices` MCP tool 更新。跑一次大概三秒，比你起身走到燈的開關旁邊還快。
+Recommended: run once manually on first deployment, then use the `refresh_devices` MCP tool to update. Takes about three seconds — faster than walking to a light switch.
 
 ---
 
-## 附錄 C：TRADFRI CoAP 快速參照（小抄）
+## Appendix C: TRADFRI CoAP quick reference (the cheat sheet)
 
-### 資源路徑
+### Resource paths
 
-| 路徑 | 說明 |
-|------|------|
-| `GET /15001` | 所有設備 ID 列表 |
-| `GET /15001/{id}` | 單一設備詳情 |
-| `PUT /15001/{id}` | 控制單一設備 |
-| `GET /15004` | 所有群組 ID 列表 |
-| `GET /15004/{id}` | 單一群組詳情 |
-| `PUT /15004/{id}` | 控制群組 |
-| `GET /15005/{gid}` | 群組的場景列表 |
-| `GET /15005/{gid}/{sid}` | 場景詳情 |
+| Path | Description |
+|------|-------------|
+| `GET /15001` | list all device IDs |
+| `GET /15001/{id}` | single device details |
+| `PUT /15001/{id}` | control a single device |
+| `GET /15004` | list all group IDs |
+| `GET /15004/{id}` | single group details |
+| `PUT /15004/{id}` | control a group |
+| `GET /15005/{gid}` | scene list for a group |
+| `GET /15005/{gid}/{sid}` | scene details |
 
-### 常用 CoAP key（這些數字會刻在你腦子裡）
+### Common CoAP keys (these numbers will be burned into your brain)
 
-| Key | 含義 | 值域 |
-|-----|------|------|
-| `9001` | 名稱 | 字串 |
-| `9003` | ID | 整數 |
-| `5750` | 設備類型 | 0=遙控,2=燈,3=插座 |
-| `5850` | 開關狀態 | 0/1 |
-| `5851` | 亮度 | 0--254 |
-| `5711` | 色溫（Mireds）| 250--454 |
-| `5709` | 顏色 X（CIE）| 0--65535 |
-| `5710` | 顏色 Y（CIE）| 0--65535 |
-| `9039` | 觸發場景 ID | 整數 |
+| Key | Meaning | Range |
+|-----|---------|-------|
+| `9001` | name | string |
+| `9003` | ID | integer |
+| `5750` | device type | 0=remote, 2=light, 3=socket |
+| `5850` | on/off state | 0/1 |
+| `5851` | brightness | 0–254 |
+| `5711` | colour temp (Mireds) | 250–454 |
+| `5709` | colour X (CIE) | 0–65535 |
+| `5710` | colour Y (CIE) | 0–65535 |
+| `9039` | trigger scene ID | integer |
 
-### aiocoap credentials 設定（重要，這個坑我已經幫你踩過了）
+### aiocoap credentials configuration (important — I already stepped in this one for you)
 
-URI pattern 不能帶 port 號：
+Do not include a port in the URI pattern:
 
 ```python
 ctx.client_credentials.load_from_dict({
-    "coaps://192.168.x.x/*": {      # ← 不要寫 :5684
+    "coaps://192.168.x.x/*": {      # ← do NOT write :5684
         "dtls": {
             "psk": psk.encode(),
             "client-identity": identity.encode(),
@@ -527,5 +523,5 @@ ctx.client_credentials.load_from_dict({
 
 ---
 
-*本文對應的 MCP server source code：[kc_tradfri_mcp](https://github.com/KerberosClaw/kc_tradfri_mcp)*
-*DTLS 踩坑詳細紀錄：[docs/dtls-tradfri-pitfalls.md](./dtls-tradfri-pitfalls.md)*
+*MCP server source code for this document: [tradfri_mcp](https://github.com/marcinn2/tradfri_mcp)*
+*Detailed DTLS pitfall record: [docs/dtls-tradfri-pitfalls.md](./dtls-tradfri-pitfalls.md)*

@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """
-TRADFRI gateway 掃描 — 直接用 aiocoap 發 CoAP GET，不依賴 pytradfri model 解析
-用法: python3 scripts/scan.py
-環境變數:
-  TRADFRI_GATEWAY_IP  — gateway IP（必填）
-  PSK_FILE            — PSK 憑證路徑（預設 .tradfri_psk.json）
+TRADFRI gateway scan — CoAP GET via aiocoap, no pytradfri model parsing
+Usage: python3 scripts/scan.py
+Env vars:
+  TRADFRI_GATEWAY_IP  — gateway IP (required)
+  PSK_FILE            — PSK credential path (default .tradfri_psk.json)
 """
 import asyncio, json, os, sys
 import aiocoap
@@ -14,13 +14,16 @@ GATEWAY_IP = os.environ.get("TRADFRI_GATEWAY_IP", "")
 PSK_FILE   = os.environ.get("PSK_FILE", ".tradfri_psk.json")
 
 if not GATEWAY_IP:
-    print("ERROR: 請設定 TRADFRI_GATEWAY_IP 環境變數", file=sys.stderr)
+    print("ERROR: set TRADFRI_GATEWAY_IP", file=sys.stderr)
     sys.exit(1)
 
 KEY_NAME       = "9001"
 KEY_ID         = "9003"
 KEY_TYPE       = "5750"
 KEY_REACHABLE  = "9019"
+KEY_DEV_INFO   = "3"
+KEY_BATTERY    = "9"
+KEY_POWER_SRC  = "6"
 KEY_LIGHT      = "3311"
 KEY_PLUG       = "3312"
 KEY_DIMMER     = "5851"
@@ -53,7 +56,7 @@ async def main():
         }
     })
 
-    # ── 設備 ───────────────────────────────────────────────────────────────
+    # ── devices ────────────────────────────────────────────────────────────
     print("=" * 60)
     print("DEVICES")
     print("=" * 60)
@@ -68,6 +71,12 @@ async def main():
             "type":      APP_TYPE.get(d.get(KEY_TYPE), d.get(KEY_TYPE)),
             "reachable": bool(d.get(KEY_REACHABLE, 0)),
         }
+
+        dev_info = d.get(KEY_DEV_INFO, {})
+        if KEY_BATTERY in dev_info:
+            info["battery"] = dev_info[KEY_BATTERY]       # 0–100, battery devices only
+        if KEY_POWER_SRC in dev_info:
+            info["power_source"] = dev_info[KEY_POWER_SRC]
 
         if KEY_LIGHT in d:
             info["lights"] = []
@@ -85,7 +94,7 @@ async def main():
 
         print(json.dumps(info, ensure_ascii=False, indent=2))
 
-    # ── 群組 ───────────────────────────────────────────────────────────────
+    # ── groups ─────────────────────────────────────────────────────────────
     print()
     print("=" * 60)
     print("GROUPS")
