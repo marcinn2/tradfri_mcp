@@ -456,7 +456,8 @@ async def battery_report(threshold: int = 100, live: bool = False) -> str:
 
     Args:
         threshold: only include devices at or below this percentage (default 100 = all)
-        live:      query the gateway for fresh values; otherwise read cached devices.json
+        live:      query the gateway for fresh values and update the cache;
+                   otherwise read cached devices.json
     """
     _log.info("battery_report(threshold=%s, live=%s)", threshold, live)
 
@@ -466,6 +467,10 @@ async def battery_report(threshold: int = 100, live: bool = False) -> str:
         for did in device_ids:
             raw = await coap.coap_get(f"/15001/{did}")
             devices.append(parse_device(raw))
+        # persist the fresh devices so a later live=false read isn't stale
+        data = load_devices()
+        data["devices"] = devices
+        save_devices(data)
     else:
         devices = load_devices().get("devices", [])
 
